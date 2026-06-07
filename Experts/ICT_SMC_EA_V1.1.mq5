@@ -300,7 +300,7 @@ string   PANEL_PREFIX    = "ICTSMC_";
 int      PANEL_X         = 10;
 int      PANEL_Y         = 30;
 int      PANEL_W         = 300;
-int      PANEL_LINE_H    = 16;
+int      PANEL_LINE_H    = 14;
 color    PANEL_BG        = C'20,20,28';
 color    PANEL_BORDER    = C'60,60,80';
 color    PANEL_HDR_BG    = C'30,30,50';
@@ -1422,7 +1422,7 @@ void PanelDeleteBody()
       if(StringFind(nm,PANEL_PREFIX)==0&&
          nm!=PANEL_PREFIX+"Header"&&nm!=PANEL_PREFIX+"ToggleBtn"&&
          nm!=PANEL_PREFIX+"HdrBG" &&nm!=PANEL_PREFIX+"Title"&&
-         nm!=PANEL_PREFIX+"Author") ObjectDelete(0,nm);
+         nm!=PANEL_PREFIX+"Author"&&nm!=PANEL_PREFIX+"BG") ObjectDelete(0,nm);
    }
 }
 void PanelRect(string name,int x,int y,int w,int h,color bg,color border=clrNONE)
@@ -1515,8 +1515,11 @@ void UpdateDisplay()
 
    PanelLoadPosition();
    int x=PANEL_X,w=PANEL_W,lh=PANEL_LINE_H;
-   int px=x+8,vx=px+148,rowTop=4,row=0;
+   int px=x+8,vx=px+148,rowTop=2,row=0;
    int hdrH=52,yb=PANEL_Y;
+
+   // BG created FIRST so it has the lowest z-order — labels drawn after will appear on top
+   PanelRect("BG", x,yb,w,panelHidden?hdrH:800, PANEL_BG, PANEL_BORDER);
 
    // Header — always visible
    PanelRect  ("HdrBG",  x,yb,w,hdrH,PANEL_HDR_BG,PANEL_BORDER);
@@ -1527,11 +1530,10 @@ void UpdateDisplay()
    PanelLabel ("ToggleBtn",x+w-50,yb+4,panelHidden?"[show]":"[hide]",PANEL_BLUE,8);
    ObjectSetInteger(0,PANEL_PREFIX+"ToggleBtn",OBJPROP_SELECTABLE,true);
 
-   if(panelHidden){ ObjectSetInteger(0,PANEL_PREFIX+"HdrBG",OBJPROP_YSIZE,hdrH); ChartRedraw(0); return; }
+   if(panelHidden){ ChartRedraw(0); return; }
 
-   // Body
+   // Body — BG already created above, just update header overlay and labels
    int y=yb+hdrH;
-   PanelRect  ("BG",    x,yb,w,800, PANEL_BG,    PANEL_BORDER);
    PanelRect  ("HdrBG", x,yb,w,hdrH,PANEL_HDR_BG,PANEL_BORDER);
    PanelLabelC("Title", yb+6, EA_NAME,                      PANEL_GOLD,12);
    PanelLabelC("Author",yb+28,"Created by: RATTANA CHHORM", clrWhite,   9);
