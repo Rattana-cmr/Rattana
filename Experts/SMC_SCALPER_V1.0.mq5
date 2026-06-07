@@ -301,7 +301,7 @@ void OnTick()
    }
 
    // Copy indicator buffers (series order: [0]=current bar, [1]=last closed, [2]=2 bars ago)
-   double fa[3], sl_[3], tr[3], rs[3], at[3];
+   double fa[], sl_[], tr[], rs[], at[];
    ArraySetAsSeries(fa,  true); ArraySetAsSeries(sl_, true);
    ArraySetAsSeries(tr,  true); ArraySetAsSeries(rs,  true);
    ArraySetAsSeries(at,  true);
@@ -352,7 +352,7 @@ void OnTick()
    }
    else // SC_SIG_PRICE_ACTION — bullish/bearish engulfing
    {
-      MqlRates rates[3];
+      MqlRates rates[];
       ArraySetAsSeries(rates, true);
       if(CopyRates(_Symbol, _Period, 0, 3, rates) < 3) { UpdateDisplaySC(); return; }
 
@@ -414,7 +414,7 @@ void OnTick()
 //===================================================================//
 void ManagePosSC()
 {
-   double at[2];
+   double at[];
    ArraySetAsSeries(at, true);
    bool atrOK = (CopyBuffer(hATR_SC, 0, 0, 2, at) >= 2);
 
@@ -928,7 +928,7 @@ void UpdateDisplaySC()
    ScLbl("SpV",vx,y+row*lh+rt,DoubleToString(sprd,0)+" pts", sprdC); row++;
 
    // ATR
-   double at2[2]; ArraySetAsSeries(at2,true);
+   double at2[]; ArraySetAsSeries(at2,true);
    double atrPips = 0;
    if(CopyBuffer(hATR_SC,0,0,2,at2)>=2) atrPips = at2[1]/_Point/pipFactorSC;
    color atrC = atrPips >= MinATRPipsSC ? C_GRN : C_RED;
@@ -936,7 +936,7 @@ void UpdateDisplaySC()
    ScLbl("AtV",vx,y+row*lh+rt,DoubleToString(atrPips,1)+" pips", atrC); row++;
 
    // EMA direction
-   double fa2[2], sl2[2]; ArraySetAsSeries(fa2,true); ArraySetAsSeries(sl2,true);
+   double fa2[], sl2[]; ArraySetAsSeries(fa2,true); ArraySetAsSeries(sl2,true);
    string emaDir = "---"; color emaDC = C_TXT;
    if(CopyBuffer(hEMAFast_SC,0,0,2,fa2)>=2 && CopyBuffer(hEMASlow_SC,0,0,2,sl2)>=2)
    { emaDir = fa2[0]>sl2[0]?"BULL":"BEAR"; emaDC = fa2[0]>sl2[0]?C_GRN:C_RED; }
@@ -944,7 +944,7 @@ void UpdateDisplaySC()
    ScLbl("EmV",vx,y+row*lh+rt, emaDir, emaDC); row++;
 
    // RSI
-   double rs2[2]; ArraySetAsSeries(rs2,true);
+   double rs2[]; ArraySetAsSeries(rs2,true);
    double rsiV = 50;
    if(CopyBuffer(hRSI_SC,0,0,2,rs2)>=2) rsiV = rs2[0];
    color rsiC = rsiV>55?C_GRN:rsiV<45?C_RED:C_GOLD;
