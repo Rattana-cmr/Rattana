@@ -8,7 +8,28 @@
 //
 // CHANGELOG V1.0 BACKTEST FIX PATCH
 // -----------------------------------------------------------------------
-// ROOT CAUSE ANALYSIS from backtest (47 trades, -13.4% net, PF=0.81):
+// ROOT CAUSE ANALYSIS from 2nd backtest log (56 trades, -4.5% net, PF=0.94):
+//   LOG BUG 1 — "Invalid stops" retry loop (March 13):
+//     Trade #90 SELL: SL=0.51 price, TP=1.02 price. TP was inside the broker
+//     freeze level. EA retried 30+ times/sec until TP drifted out. This also
+//     produced 0.1 lot (tiny SL → huge position to meet 0.5% risk).
+//   LOG BUG 2 — SKIP:R:R=2.00<min2.00 spam (99 occurrences):
+//     Float comparison 2.0 < 2.0 sometimes true → needless SKIP + re-entry.
+//   LOG BUG 3 — Failed order does not reset CISD:
+//     When trade.Sell() returns false, cisd1MinConfirmed stays true → next
+//     tick calls PlaceTrade again → same "Invalid stops" failure → loop.
+//
+// FIX Q: MinSLPips = 10 pips input added. PlaceTrade skips if SL distance
+//         < MinSLPips pips. Eliminates tiny-SL trades that live inside spread.
+// FIX R: R:R check tolerance added (−0.001): actualRR < minRR−0.001 instead
+//         of strict <. Eliminates the 99 false SKIP prints from fp rounding.
+// FIX S: On ANY trade.Buy/Sell failure, cisd1MinConfirmed is immediately
+//         reset to false. Breaks the retry loop dead on first failure.
+// FIX T: MaxDailyLossTradesInput added (default 3). After N losing trades
+//         on same calendar day, EA stops new entries until midnight reset.
+//         Prevents the March 25 cluster of 3 consecutive SL hits.
+// -----------------------------------------------------------------------
+// ROOT CAUSE ANALYSIS from 1st backtest (47 trades, -13.4% net, PF=0.81):
 //   - Actual R:R delivered = 1.19 (avg win $29.35 / avg loss $24.70)
 //     vs target 2.0 → trades reversing before hitting TP
 //   - BUY bias: 34/47 trades = 72% BUY with only 38% WR vs SELL 46% WR
@@ -76,7 +97,8 @@ input group "========== TRADE FILTERS =========="
 input bool     UseTimeFilter        = true;   // Use trading hours
 input int      MaxSpreadPoints      = 50;     // Max spread (0 = disable)
 input int      MinStopDistance      = 20;     // Min SL distance in points
-input int      MaxConsecutiveLosses = 10;     // Halt after N consecutive losses
+input int      MaxConsecutiveLosses = 10;     // Halt after N consecutive losses (lifetime)
+input int      MaxDailyLossTrades   = 3;      // FIX T: Max losing trades per day (0=disabled)
 input bool     ResetLossStreakDaily = true;   // Reset streak daily (true) or lifetime (false)
 
 //===================== SESSION CONTROLS =====================//
@@ -111,6 +133,7 @@ input int      SwingLookbackBarsM15 = 30;     // M15 bars to scan (SL)
 input int      SwingConfirmBarsM15  = 5;      // Bars each side to confirm M15 swing
 input int      MaxSwingDistancePips = 500;    // Max swing distance in pips (0=disabled)
 input int      MaxSLPips            = 30;     // FIX O: Max SL in pips (was 50, now 30)
+input int      MinSLPips            = 10;     // FIX Q: Min SL in pips - skips tiny-SL trades (0=disabled)
 input bool     ShowSwingLines       = true;   // Draw M15 swing SL lines
 
 //===================== ICT TWINS MODEL =====================//
@@ -142,6 +165,7 @@ int      SlowEMAHandle    = INVALID_HANDLE;
 datetime LastBarTime      = 0;
 datetime LastTradeCloseTime = 0;
 int      TodayTradeCount  = 0;
+int      TodayLossTrades  = 0;   // FIX T: losing trade count for current day
 int      LastTradeDay     = 0;
 double   TodayLoss        = 0;
 int      consecutiveLosses = 0;
@@ -358,6 +382,7 @@ void OnTrade()
          statLosses++;
          consecutiveLosses++;
          consecutiveWins = 0;
+         TodayLossTrades++;   // FIX T: count losing trades today
          if(GlobalVariableCheck(rrKey)) GlobalVariableDel(rrKey);
       }
 
@@ -1216,6 +1241,7 @@ void UpdateDailyCounters()
    if(dt.day == LastTradeDay) return;
 
    TodayTradeCount   = 0;
+   TodayLossTrades   = 0;   // FIX T: reset daily loss trade counter
    TodayLoss         = 0;
    if(ResetLossStreakDaily) consecutiveLosses = 0;
    LastTradeDay      = dt.day;
@@ -1274,6 +1300,12 @@ bool CanTrade()
    if(TodayTradeCount >= MaxTradesPerDay)
    {
       if(canLog) { Print("CANTRADE: Max trades (", TodayTradeCount, "/", MaxTradesPerDay, ")"); lastCanTradeLog = TimeCurrent(); }
+      return false;
+   }
+   // FIX T: stop new entries after N losing trades today (prevents cluster losses)
+   if(MaxDailyLossTrades > 0 && TodayLossTrades >= MaxDailyLossTrades)
+   {
+      if(canLog) { Print("CANTRADE: Daily loss trades limit (", TodayLossTrades, "/", MaxDailyLossTrades, ")"); lastCanTradeLog = TimeCurrent(); }
       return false;
    }
    if(consecutiveLosses >= MaxConsecutiveLosses)
@@ -1378,14 +1410,28 @@ void PlaceTrade(bool isBuy = true)
       }
    }
 
+   // FIX Q: Reject if SL is too small in pips (prevents tiny-SL trades with huge lots
+   //         that live inside the spread and trigger "Invalid stops" on broker)
+   if(MinSLPips > 0)
+   {
+      double slPips = slPoints / PipFactor;
+      if(slPips < (double)MinSLPips)
+      {
+         Print("SKIP: SL too small (", DoubleToString(slPips,2), " pips < min ", MinSLPips, ")");
+         cisd1MinConfirmed = false;   // FIX S: break retry loop
+         return;
+      }
+   }
+
    double fixedTP = isBuy
       ? NormalizeDouble(entry + slPoints*_Point*RewardRiskRatio, _Digits)
       : NormalizeDouble(entry - slPoints*_Point*RewardRiskRatio, _Digits);
    double tp = fixedTP;
 
    double actualRR = MathAbs(tp - entry) / MathAbs(entry - sl);
-   if(actualRR < MinRewardRiskRatio)
-   { Print("SKIP: R:R=", DoubleToString(actualRR,2), " < min ", DoubleToString(MinRewardRiskRatio,2)); return; }
+   // FIX R: use 0.001 tolerance to avoid float comparison 2.0 < 2.0 firing falsely
+   if(actualRR < MinRewardRiskRatio - 0.001)
+   { Print("SKIP: R:R=", DoubleToString(actualRR,4), " < min ", DoubleToString(MinRewardRiskRatio,2)); cisd1MinConfirmed = false; return; }
 
    if(isBuy  && tp <= entry) { Print("SKIP: TP below entry (BUY)");  return; }
    if(!isBuy && tp >= entry) { Print("SKIP: TP above entry (SELL)"); return; }
@@ -1442,6 +1488,9 @@ void PlaceTrade(bool isBuy = true)
    else
    {
       Print("TRADE FAILED: ", trade.ResultRetcodeDescription());
+      // FIX S: reset 1M trigger on any failure to break the per-tick retry loop.
+      // Without this, the next tick re-enters PlaceTrade and hits the same error.
+      cisd1MinConfirmed = false;
    }
 }
 
@@ -1661,6 +1710,9 @@ void UpdateDisplay()
    PanelLabel("SpV",  vx, y+row*lh+rowTop, DoubleToString(spread,0)+" pts "+(spreadOK?"OK":"BLOCKED"), spreadOK?PANEL_GREEN:PANEL_RED); row++;
    PanelLabel("TdL",  px,     y+row*lh+rowTop, "Trades    :", PANEL_TXT);
    PanelLabel("TdV",  vx, y+row*lh+rowTop, IntegerToString(TodayTradeCount)+"/"+IntegerToString(MaxTradesPerDay), PANEL_TXT); row++;
+   PanelLabel("DLl",  px,     y+row*lh+rowTop, "Day Losses:", PANEL_TXT);
+   bool dlimitHit = (MaxDailyLossTrades>0 && TodayLossTrades>=MaxDailyLossTrades);
+   PanelLabel("DLv",  vx, y+row*lh+rowTop, IntegerToString(TodayLossTrades)+"/"+IntegerToString(MaxDailyLossTrades)+(dlimitHit?" HALTED":""), dlimitHit?PANEL_RED:PANEL_TXT); row++;
    PanelLabel("CLl",  px,     y+row*lh+rowTop, "ConLosses :", PANEL_TXT);
    PanelLabel("CLv",  vx, y+row*lh+rowTop, IntegerToString(consecutiveLosses)+"/"+IntegerToString(MaxConsecutiveLosses), consecutiveLosses>5?PANEL_RED:PANEL_TXT); row++;
    PanelLabel("WSl",  px,     y+row*lh+rowTop, "Win Streak:", PANEL_TXT);
