@@ -1541,14 +1541,12 @@ void UpdateDisplay()
    PanelLabel ("Header",   px,   yb+4,"[drag]",C'50,50,70',7);
 
    row=0;
-   PanelDivider("D0",x+2,y+row*lh+rowTop/2); row++;
 
    PanelLabel("BalL",px,y+row*lh+rowTop,"Balance  :",PANEL_TXT);
    PanelLabel("BalV",vx,y+row*lh+rowTop,"$"+DoubleToString(balance,2),PANEL_GREEN); row++;
    color eqClr=pnl>=0?PANEL_GREEN:PANEL_RED;
    PanelLabel("EqL", px,y+row*lh+rowTop,"Equity   :",PANEL_TXT);
    PanelLabel("EqV", vx,y+row*lh+rowTop,"$"+DoubleToString(equity,2)+"  (P/L:$"+DoubleToString(pnl,2)+")",eqClr); row++;
-   PanelDivider("D1",x+2,y+row*lh+rowTop/2); row++;
 
    // Broker Time (auto-detected, DST-aware)
    PanelLabel("BkHd",px,y+row*lh+rowTop,"BROKER TIME:",PANEL_GOLD); row++;
@@ -1559,7 +1557,6 @@ void UpdateDisplay()
    PanelLabel("BkOl",px,y+row*lh+rowTop,"GMT Offset :",PANEL_TXT);
    string offDisp=offsetLabel+(offsetMatch?"":" [input:"+IntegerToString(BrokerGMTOffset)+"]");
    PanelLabel("BkOv",vx,y+row*lh+rowTop,offDisp,offsetMatch?PANEL_GOLD:PANEL_RED); row++;
-   PanelDivider("D1b",x+2,y+row*lh+rowTop/2); row++;
 
    PanelLabel("SeL",px,y+row*lh+rowTop,"Session  :",PANEL_TXT);
    PanelLabel("SeV",vx,y+row*lh+rowTop,inSess?"ACTIVE":"CLOSED",inSess?PANEL_GREEN:PANEL_RED); row++;
@@ -1580,84 +1577,66 @@ void UpdateDisplay()
    PanelLabel("CLv",vx,y+row*lh+rowTop,IntegerToString(consecutiveLosses)+"/"+IntegerToString(MaxConsecutiveLosses),consecutiveLosses>5?PANEL_RED:PANEL_TXT); row++;
    PanelLabel("WSl",px,y+row*lh+rowTop,"WinStreak:",PANEL_TXT);
    PanelLabel("WSv",vx,y+row*lh+rowTop,IntegerToString(consecutiveWins),consecutiveWins>0?PANEL_GREEN:PANEL_TXT); row++;
-   PanelDivider("D2",x+2,y+row*lh+rowTop/2); row++;
 
    // ICT V1.1 Context Sequence
    PanelLabel("SeqH",px,y+row*lh+rowTop,"ICT SMC V1.1 SEQUENCE:",PANEL_GOLD); row++;
 
-   // Step 1: HTF Level
    string s1v=!HTFLevelRequired?"DISABLED":(htfLevelReached?"PASS":"WAIT");
    color  s1c=!HTFLevelRequired?PANEL_GOLD:(htfLevelReached?PANEL_GREEN:PANEL_TXT);
    PanelLabel("S1l",px,y+row*lh+rowTop,"[1] HTF Level :",PANEL_TXT);
    PanelLabel("S1v",vx,y+row*lh+rowTop,s1v,s1c); row++;
 
-   // Step 2: MSS or 5M CISD
    string s2label=UseMSSFilter?"[2] MSS H1    :":"[2] 5M CISD   :";
    string s2v=mssConfirmed?"CONFIRMED ("+(mssIsBullish?"BULL":"BEAR")+")":"waiting...";
    PanelLabel("S2l",px,y+row*lh+rowTop,s2label,PANEL_TXT);
    PanelLabel("S2v",vx,y+row*lh+rowTop,s2v,mssConfirmed?PANEL_GREEN:PANEL_TXT); row++;
 
-   // Step 3: BOS
    string s3v=!UseBOSFilter?"OFF":(bosConfirmed?"CONFIRMED ("+(bosIsBullish?"BULL":"BEAR")+")":"waiting...");
    color  s3c=!UseBOSFilter?PANEL_GOLD:(bosConfirmed?PANEL_GREEN:PANEL_TXT);
    PanelLabel("S3l",px,y+row*lh+rowTop,"[3] BOS M15   :",PANEL_TXT);
    PanelLabel("S3v",vx,y+row*lh+rowTop,s3v,s3c); row++;
 
-   // Step 4: Liquidity Sweep
    string s4v=!RequireLiquiditySweep?"OFF":(liquiditySweepDone?"DONE ("+(sweepIsBullish?"BULL":"BEAR")+")":"waiting...");
    color  s4c=!RequireLiquiditySweep?PANEL_GOLD:(liquiditySweepDone?PANEL_GREEN:PANEL_TXT);
    PanelLabel("S4l",px,y+row*lh+rowTop,"[4] Liquidity :",PANEL_TXT);
    PanelLabel("S4v",vx,y+row*lh+rowTop,s4v,s4c); row++;
 
-   // Step 5: FVGs
    string s5v=IntegerToString(fvgCount1Min)+"/"+IntegerToString(effFVG)+(RelaxedMode?" (R)":"");
    PanelLabel("S5l",px,y+row*lh+rowTop,"[5] 1M FVGs   :",PANEL_TXT);
    PanelLabel("S5v",vx,y+row*lh+rowTop,s5v,(fvgCount1Min>=effFVG||effFVG==0)?PANEL_GREEN:PANEL_TXT); row++;
 
-   // Step 6: H1 Swings
    PanelLabel("S6l",px,y+row*lh+rowTop,"[6] H1 Swings :",PANEL_TXT);
    PanelLabel("S6v",vx,y+row*lh+rowTop,lastSwingHighH1>0?"PASS":"WAIT",lastSwingHighH1>0?PANEL_GREEN:PANEL_TXT); row++;
 
-   // Step 7: M15 Swings
    bool m15ok=lastSwingHighM15>0||lastSwingLowM15>0;
    PanelLabel("S7l",px,y+row*lh+rowTop,"[7] M15 Swings:",PANEL_TXT);
    PanelLabel("S7v",vx,y+row*lh+rowTop,m15ok?"PASS":"ATR FB",m15ok?PANEL_GREEN:PANEL_GOLD); row++;
 
    PanelLabel("SvH",px,y+row*lh+rowTop,"-- LIVE ENTRY --",C'80,80,100'); row++;
 
-   // OTE Zone (live)
    PanelLabel("SOl",px,y+row*lh+rowTop,"[★] OTE Zone  :",PANEL_TXT);
    PanelLabel("SOv",vx,y+row*lh+rowTop,inOTE?"PASS":"WAIT",inOTE?PANEL_GREEN:PANEL_TXT); row++;
 
-   // 1M Trigger (live)
    string s9v=cisd1MinConfirmed?"READY ("+(cisd1MinIsBearish?"BEAR":"BULL")+")":"waiting...";
    PanelLabel("S9l",px,y+row*lh+rowTop,"[★] 1M Trigger:",PANEL_TXT);
    PanelLabel("S9v",vx,y+row*lh+rowTop,s9v,cisd1MinConfirmed?PANEL_GREEN:PANEL_TXT); row++;
 
-   // Direction
    string sdirV=(mssConfirmed&&cisd1MinConfirmed)?(mssIsBullish==!cisd1MinIsBearish?"AGREE":"CONFLICT"):"WAIT";
    PanelLabel("SDl",px,y+row*lh+rowTop,"[★] Direction :",PANEL_TXT);
    PanelLabel("SDv",vx,y+row*lh+rowTop,sdirV,sdirV=="AGREE"?PANEL_GREEN:sdirV=="CONFLICT"?PANEL_RED:PANEL_TXT); row++;
 
-   // Trade Score
    string scoreStr=IntegerToString(lastTradeScore)+"/100 (min "+IntegerToString(effMinScore)+")";
    color scoreClr=lastTradeScore>=effMinScore?PANEL_GREEN:lastTradeScore>=effMinScore-10?PANEL_GOLD:PANEL_RED;
    PanelLabel("SCl",px,y+row*lh+rowTop,"[★] Score     :",PANEL_TXT);
    PanelLabel("SCv",vx,y+row*lh+rowTop,scoreStr,scoreClr); row++;
 
-   // News
    if(UseNewsFilter)
-   {
-      PanelLabel("NWl",px,y+row*lh+rowTop,"News Filter:",PANEL_TXT);
-      PanelLabel("NWv",vx,y+row*lh+rowTop,newsBlocked?"BLOCKED":"CLEAR",newsBlocked?PANEL_RED:PANEL_GREEN); row++;
-   }
-   PanelDivider("D3",x+2,y+row*lh+rowTop/2); row++;
+   { PanelLabel("NWl",px,y+row*lh+rowTop,"News Filter:",PANEL_TXT);
+     PanelLabel("NWv",vx,y+row*lh+rowTop,newsBlocked?"BLOCKED":"CLEAR",newsBlocked?PANEL_RED:PANEL_GREEN); row++; }
 
-   // Last block
    string lbv=lastFailedStep>0?"STEP "+IntegerToString(lastFailedStep)+" — "+lastFailedStepDesc:"None";
    PanelLabel("LBl",px,y+row*lh+rowTop,"Last Block   :",PANEL_TXT);
    PanelLabel("LBv",vx,y+row*lh+rowTop,lbv,lastFailedStep>0?PANEL_GOLD:PANEL_GREEN); row++;
-   PanelDivider("D3b",x+2,y+row*lh+rowTop/2); row++;
 
    // Swings
    PanelLabel("SwH",px,y+row*lh+rowTop,"SWINGS:",PANEL_GOLD); row++;
@@ -1665,7 +1644,6 @@ void UpdateDisplay()
    PanelLabel("H1v",px+40,y+row*lh+rowTop,"H="+DoubleToString(lastSwingHighH1,_Digits)+"  L="+DoubleToString(lastSwingLowH1,_Digits),PANEL_BLUE); row++;
    PanelLabel("M1l",px,y+row*lh+rowTop,"M15:",PANEL_TXT);
    PanelLabel("M1v",px+40,y+row*lh+rowTop,"H="+DoubleToString(lastSwingHighM15,_Digits)+"  L="+DoubleToString(lastSwingLowM15,_Digits),PANEL_BLUE); row++;
-   PanelDivider("D4",x+2,y+row*lh+rowTop/2); row++;
 
    // Sessions
    PanelLabel("SsH",px,y+row*lh+rowTop,"SESSIONS:",PANEL_GOLD); row++;
@@ -1678,7 +1656,6 @@ void UpdateDisplay()
    PanelLabel("FLv",vx,y+row*lh+rowTop,BestHoursOnly?"08:30 GMT":"(all session)",PANEL_GOLD); row++;
    PanelLabel("FPl",px,y+row*lh+rowTop,"Fri Cutoff :",PANEL_TXT);
    PanelLabel("FPv",vx,y+row*lh+rowTop,CloseOnFriday?(IntegerToString(FridayCloseHour)+":00 GMT"):"OFF",CloseOnFriday?PANEL_GOLD:PANEL_TXT); row++;
-   PanelDivider("D5",x+2,y+row*lh+rowTop/2); row++;
 
    // Statistics
    PanelLabel("StH",px,y+row*lh+rowTop,"STATISTICS:",PANEL_GOLD); row++;
@@ -1688,15 +1665,13 @@ void UpdateDisplay()
    PanelLabel("ARl", px,y+row*lh+rowTop,"Avg RR  :",PANEL_TXT); PanelLabel("ARv",vx,y+row*lh+rowTop,DoubleToString(avgRR2,2),avgRR2>=1.5?PANEL_GREEN:PANEL_TXT); row++;
    PanelLabel("PFl", px,y+row*lh+rowTop,"Profit F:",PANEL_TXT); PanelLabel("PFv",vx,y+row*lh+rowTop,DoubleToString(pf2,2),pf2>=1.5?PANEL_GREEN:pf2>=1.0?PANEL_GOLD:PANEL_RED); row++;
    PanelLabel("NPl", px,y+row*lh+rowTop,"Net P&L :",PANEL_TXT); PanelLabel("NPv",vx,y+row*lh+rowTop,"$"+DoubleToString(netPnL,2),netPnL>=0?PANEL_GREEN:PANEL_RED); row++;
-   PanelDivider("D6",x+2,y+row*lh+rowTop/2); row++;
 
    // Drawdown
    PanelLabel("DDH",px,y+row*lh+rowTop,"DRAWDOWN:",PANEL_GOLD); row++;
    PanelLabel("DCl",px,y+row*lh+rowTop,"Current :",PANEL_TXT); PanelLabel("DCv",vx,y+row*lh+rowTop,"$"+DoubleToString(curDD,2),curDD>0?PANEL_RED:PANEL_GREEN); row++;
    PanelLabel("DMl",px,y+row*lh+rowTop,"Sess Max:",PANEL_TXT); PanelLabel("DMv",vx,y+row*lh+rowTop,"$"+DoubleToString(sessionMaxDrawdown,2),PANEL_TXT); row++;
-   PanelDivider("D7",x+2,y+row*lh+rowTop/2); row++;
 
-   // Config
+   // Config / Risk Settings
    PanelLabel("RkL",px,y+row*lh+rowTop,"Risk Mode  :",PANEL_TXT); PanelLabel("RkV",vx,y+row*lh+rowTop,EnumToString(RiskMode)+" "+DoubleToString(effRiskPct,2)+"%",PANEL_GOLD); row++;
    PanelLabel("TpL",px,y+row*lh+rowTop,"TP Mode    :",PANEL_TXT); PanelLabel("TpV",vx,y+row*lh+rowTop,EnumToString(TPMode),PANEL_GOLD); row++;
    PanelLabel("OmL",px,y+row*lh+rowTop,"Opt Mode   :",PANEL_TXT); PanelLabel("OmV",vx,y+row*lh+rowTop,EnumToString(OptMode),PANEL_GOLD); row++;
@@ -1705,6 +1680,7 @@ void UpdateDisplay()
    bool ptpOn=UsePartialTP; PanelLabel("PTl",px,y+row*lh+rowTop,"Partial TP :",PANEL_TXT); PanelLabel("PTv",vx,y+row*lh+rowTop,ptpOn?"ON ("+DoubleToString(PartialClosePercent,0)+"% at "+DoubleToString(PartialCloseRR,1)+"R)":"OFF",ptpOn?PANEL_GREEN:PANEL_TXT); row++;
    PanelLabel("DMdl",px,y+row*lh+rowTop,"Debug Mode :",PANEL_TXT); PanelLabel("DMdv",vx,y+row*lh+rowTop,DebugMode?"ON":"OFF",DebugMode?PANEL_GOLD:PANEL_TXT); row++;
    PanelLabel("FTl",px,y+row*lh+rowTop,"ForceTrades:",PANEL_TXT); PanelLabel("FTv",vx,y+row*lh+rowTop,ForceTrades?"ON (TEST)":"OFF",ForceTrades?PANEL_RED:PANEL_GREEN); row++;
+   PanelLabel("RMl",px,y+row*lh+rowTop,"RelaxedMode:",PANEL_TXT); PanelLabel("RMv",vx,y+row*lh+rowTop,RelaxedMode?"ON (TEST)":"OFF",RelaxedMode?PANEL_GOLD:PANEL_GREEN); row++;
 
    int finalH=(y-yb)+row*lh+rowTop+8;
    ObjectSetInteger(0,PANEL_PREFIX+"BG",OBJPROP_YSIZE,finalH);
