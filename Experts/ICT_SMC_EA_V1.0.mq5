@@ -28,6 +28,12 @@
 // FIX T: MaxDailyLossTradesInput added (default 3). After N losing trades
 //         on same calendar day, EA stops new entries until midnight reset.
 //         Prevents the March 25 cluster of 3 consecutive SL hits.
+// FIX U: HTFLevelRequired=false (default). Step 1 now auto-passes when false,
+//         which is the ROOT CAUSE fix for "EA doesn't trade at all". In trending
+//         gold markets price moves away from all reference levels (M15 FVGs are
+//         rare, prev bar H/L and D1 H/L checks all fail simultaneously). Added
+//         H1/H4 prev-bar high-low as additional reference levels when enabled.
+//         HTFToleranceATRMulti default raised 1→2 for wider detection range.
 // -----------------------------------------------------------------------
 // ROOT CAUSE ANALYSIS from 1st backtest (47 trades, -13.4% net, PF=0.81):
 //   - Actual R:R delivered = 1.19 (avg win $29.35 / avg loss $24.70)
@@ -144,7 +150,8 @@ input double   OTEMinPercent        = 0.65;   // FIX J: OTE minimum (was 0.62, n
 input double   OTEMaxPercent        = 0.75;   // FIX J: OTE maximum (was 0.79, now 0.75)
 input double   OTESweetSpotPercent  = 0.705;  // OTE sweet spot (70.5%)
 input int      MinFVGsRequired      = 0;      // Min 1-min FVGs required (0=disabled)
-input int      HTFToleranceATRMulti = 1;      // HTF tolerance = N x ATR(14)
+input int      HTFToleranceATRMulti = 2;      // HTF tolerance = N x ATR(14)
+input bool     HTFLevelRequired     = false;  // FIX U: Require HTF key level (false=auto-pass Step 1)
 input bool     ShowOTEZone          = true;   // Draw OTE zone on chart
 input int      MinH1RangePips       = 50;     // Min H1 swing range in pips (0=disabled)
 
@@ -288,6 +295,7 @@ int OnInit()
    Print("FIX M: BUY requires 3/3 bullish D1 candles");
    Print("FIX N: London delay 08:30 GMT start");
    Print("FIX P: Friday cut-off at ", FridayCloseHour, ":00 GMT");
+   Print("FIX U: HTFLevelRequired=", HTFLevelRequired ? "ON (strict)" : "OFF (Step 1 auto-pass)");
    if(ForceTrades) Print("*** WARNING: ForceTrades=ON - testing only! ***");
    if(RelaxedMode) Print("*** RELAXED MODE ON - testing only! ***");
    Print("========================================");
@@ -506,6 +514,8 @@ double GetATR()
 //+------------------------------------------------------------------+
 bool HasReachedHTFLevel()
 {
+   if(!HTFLevelRequired) return true;   // FIX U: disabled → always pass Step 1
+
    ENUM_TIMEFRAMES htf;
    switch(HTFLevelMinutes)
    {
@@ -533,6 +543,18 @@ bool HasReachedHTFLevel()
    double prevLow  = iLow (_Symbol, htf, 1);
    if(MathAbs(price - prevHigh) <= tolerance) return true;
    if(MathAbs(price - prevLow)  <= tolerance) return true;
+
+   // H1 prev-bar high/low — real HTF reference (2x ATR tolerance)
+   double h1High = iHigh(_Symbol, PERIOD_H1, 1);
+   double h1Low  = iLow (_Symbol, PERIOD_H1, 1);
+   if(MathAbs(price - h1High) <= tolerance * 2) return true;
+   if(MathAbs(price - h1Low)  <= tolerance * 2) return true;
+
+   // H4 prev-bar high/low — institutional reference (4x ATR tolerance)
+   double h4High = iHigh(_Symbol, PERIOD_H4, 1);
+   double h4Low  = iLow (_Symbol, PERIOD_H4, 1);
+   if(MathAbs(price - h4High) <= tolerance * 4) return true;
+   if(MathAbs(price - h4Low)  <= tolerance * 4) return true;
 
    double dayHigh = iHigh(_Symbol, PERIOD_D1, 1);
    double dayLow  = iLow (_Symbol, PERIOD_D1, 1);
@@ -1523,9 +1545,11 @@ void PanelDeleteBody()
    {
       string nm = ObjectName(0, i);
       if(StringFind(nm, PANEL_PREFIX) == 0 &&
-         nm != PANEL_PREFIX + "Header" &&
+         nm != PANEL_PREFIX + "Header"    &&
          nm != PANEL_PREFIX + "ToggleBtn" &&
-         nm != PANEL_PREFIX + "HdrBG")
+         nm != PANEL_PREFIX + "HdrBG"     &&
+         nm != PANEL_PREFIX + "Title"     &&
+         nm != PANEL_PREFIX + "Author")
          ObjectDelete(0, nm);
    }
 }
@@ -1571,6 +1595,27 @@ void PanelLabel(string name, int x, int y, string text, color clr, int fontSize=
 void PanelDivider(string name, int x, int y)
 {
    PanelRect(name, x, y, PANEL_W-4, 1, PANEL_BORDER);
+}
+
+// Centered label — anchor at top-center of panel, useful for header text
+void PanelLabelC(string name, int y, string text, color clr, int fontSize=8, string font="Consolas")
+{
+   string full = PANEL_PREFIX + name;
+   int cx = PANEL_X + PANEL_W / 2;
+   if(ObjectFind(0, full) < 0)
+   {
+      ObjectCreate(0, full, OBJ_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, full, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, full, OBJPROP_HIDDEN,     true);
+      ObjectSetInteger(0, full, OBJPROP_CORNER,     CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, full, OBJPROP_ANCHOR,     ANCHOR_UPPER);
+   }
+   ObjectSetInteger(0, full, OBJPROP_XDISTANCE, cx);
+   ObjectSetInteger(0, full, OBJPROP_YDISTANCE, y);
+   ObjectSetString (0, full, OBJPROP_TEXT,      text);
+   ObjectSetInteger(0, full, OBJPROP_COLOR,     clr);
+   ObjectSetInteger(0, full, OBJPROP_FONTSIZE,  fontSize);
+   ObjectSetString (0, full, OBJPROP_FONT,      font);
 }
 
 //+------------------------------------------------------------------+
@@ -1660,33 +1705,40 @@ void UpdateDisplay()
       panelHidden = (GlobalVariableGet(PANEL_PREFIX + "Hidden") > 0.5);
 
    PanelLoadPosition();
-   int x  = PANEL_X, y = PANEL_Y, w = PANEL_W, lh = PANEL_LINE_H;
-   int px = x + 8;
-   int vx = px + 130;
+   int x      = PANEL_X, w = PANEL_W, lh = PANEL_LINE_H;
+   int px     = x + 8;
+   int vx     = px + 130;
    int rowTop = 4;
-   int row = 0;
+   int row    = 0;
+   int hdrH   = 52;        // header height for title + author
+   int yb     = PANEL_Y;   // panel origin (never changes)
 
-   PanelRect("HdrBG", x, y, w, lh+6, PANEL_HDR_BG, PANEL_BORDER);
-   PanelLabel("Header", px, y+4, EA_NAME+"  [drag]", PANEL_GOLD, 8);
-   ObjectSetInteger(0, PANEL_PREFIX+"Header", OBJPROP_SELECTABLE, true);
-
-   PanelLabel("ToggleBtn", x+w-46, y+4, panelHidden ? "[show]" : "[hide]", PANEL_BLUE, 8);
+   // ── HEADER — always visible, even when panel is collapsed ──────────────
+   PanelRect("HdrBG", x, yb, w, hdrH, PANEL_HDR_BG, PANEL_BORDER);
+   PanelLabelC("Title",  yb+6,  EA_NAME,                       PANEL_GOLD,  12);
+   PanelLabelC("Author", yb+28, "Created by: RATTANA CHHORM",  clrWhite,     9);
+   PanelLabel ("Header", px, yb+4, "[drag]", C'50,50,70', 7);
+   ObjectSetInteger(0, PANEL_PREFIX+"Header",    OBJPROP_SELECTABLE, true);
+   PanelLabel ("ToggleBtn", x+w-46, yb+4, panelHidden ? "[show]" : "[hide]", PANEL_BLUE, 8);
    ObjectSetInteger(0, PANEL_PREFIX+"ToggleBtn", OBJPROP_SELECTABLE, true);
 
    if(panelHidden)
    {
-      ObjectSetInteger(0, PANEL_PREFIX+"HdrBG", OBJPROP_YSIZE, lh+6);
+      ObjectSetInteger(0, PANEL_PREFIX+"HdrBG", OBJPROP_YSIZE, hdrH);
       ChartRedraw(0);
       return;
    }
 
-   PanelRect("BG", x, y, w, 800, PANEL_BG, PANEL_BORDER);
-   PanelRect("HdrBG", x, y, w, lh+6, PANEL_HDR_BG, PANEL_BORDER);
-   PanelLabel("Header", px, y+4, EA_NAME+"  [drag]", PANEL_GOLD, 8);
-   PanelLabel("ToggleBtn", x+w-46, y+4, "[hide]", PANEL_BLUE, 8);
+   // ── BODY ───────────────────────────────────────────────────────────────
+   int y = yb + hdrH;   // content base: rows start here
+   PanelRect("BG",    x, yb, w, 800,  PANEL_BG,     PANEL_BORDER);
+   PanelRect("HdrBG", x, yb, w, hdrH, PANEL_HDR_BG, PANEL_BORDER);
+   PanelLabelC("Title",  yb+6,  EA_NAME,                       PANEL_GOLD, 12);
+   PanelLabelC("Author", yb+28, "Created by: RATTANA CHHORM",  clrWhite,    9);
+   PanelLabel ("ToggleBtn", x+w-46, yb+4, "[hide]", PANEL_BLUE, 8);
+   PanelLabel ("Header",   px,      yb+4, "[drag]", C'50,50,70', 7);
 
-   row = 1;
-   PanelLabel("Author", px, y+row*lh+rowTop, "Created By: RATTANA CHHORM", C'130,130,160', 7); row++;
+   row = 0;
    PanelDivider("D0", x+2, y+row*lh+rowTop/2); row++;
 
    PanelLabel("BalL", px,     y+row*lh+rowTop, "Balance  :", PANEL_TXT);
@@ -1721,7 +1773,9 @@ void UpdateDisplay()
 
    PanelLabel("SeqH", px, y+row*lh+rowTop, "ICT TWINS SEQUENCE:", PANEL_GOLD); row++;
    PanelLabel("S1l",  px, y+row*lh+rowTop, "[1] HTF Level  :", PANEL_TXT);
-   PanelLabel("S1v",  vx, y+row*lh+rowTop, htfLevelReached?"PASS":"WAIT", htfLevelReached?PANEL_GREEN:PANEL_TXT); row++;
+   string s1v = !HTFLevelRequired ? "DISABLED" : (htfLevelReached ? "PASS" : "WAIT");
+   color  s1c = !HTFLevelRequired ? PANEL_GOLD  : (htfLevelReached ? PANEL_GREEN : PANEL_TXT);
+   PanelLabel("S1v",  vx, y+row*lh+rowTop, s1v, s1c); row++;
    string s2v = cisd5MinConfirmed?"CONFIRMED ("+string(cisd5MinIsBearish?"BEAR":"BULL")+")":"waiting...";
    PanelLabel("S2l",  px, y+row*lh+rowTop, "[2] 5M CISD    :", PANEL_TXT);
    PanelLabel("S2v",  vx, y+row*lh+rowTop, s2v, cisd5MinConfirmed?PANEL_GREEN:PANEL_TXT); row++;
@@ -1831,7 +1885,7 @@ void UpdateDisplay()
    PanelLabel("RMl",  px,     y+row*lh+rowTop, "RelaxedMode :", PANEL_TXT);
    PanelLabel("RMv",  vx, y+row*lh+rowTop, RelaxedMode?"ON (TEST)":"OFF", RelaxedMode?PANEL_GOLD:PANEL_GREEN); row++;
 
-   int finalH = row*lh + rowTop + 8;
+   int finalH = (y - yb) + row*lh + rowTop + 8;   // includes header height
    ObjectSetInteger(0, PANEL_PREFIX+"BG", OBJPROP_YSIZE, finalH);
    ChartRedraw(0);
 }
