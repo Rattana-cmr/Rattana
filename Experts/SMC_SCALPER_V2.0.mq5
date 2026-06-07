@@ -245,8 +245,8 @@ int OnInit()
    trade.SetExpertMagicNumber(MAGIC_SC);
    trade.SetDeviationInPoints(30);
    uint ff=(uint)SymbolInfoInteger(_Symbol,SYMBOL_FILLING_MODE);
-   trade.SetTypeFilling((ff&SYMBOL_FILLING_FOK)?ORDER_FILLING_FOK:
-                        (ff&SYMBOL_FILLING_IOC)?ORDER_FILLING_IOC:ORDER_FILLING_RETURN);
+   trade.SetTypeFilling((ff&SYMBOL_FILLING_FOK)!=0?ORDER_FILLING_FOK:
+                        (ff&SYMBOL_FILLING_IOC)!=0?ORDER_FILLING_IOC:ORDER_FILLING_RETURN);
 
    // Load stats
    string k=_Symbol+"_SC20_";
