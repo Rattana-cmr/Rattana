@@ -1678,6 +1678,17 @@ void UpdateDisplay()
    double gmtH     = GetGMTHour();
    bool   spreadOK = IsSpreadOK();
 
+   // Auto-detect broker GMT offset from TimeCurrent() vs TimeGMT() — DST-aware
+   datetime tSrv = TimeCurrent();
+   datetime tGMT = TimeGMT();
+   int detectedOffset = (int)MathRound((double)(tSrv - tGMT) / 3600.0);
+   MqlDateTime dtSrv; TimeToStruct(tSrv, dtSrv);
+   MqlDateTime dtGMT; TimeToStruct(tGMT, dtGMT);
+   string srvTimeStr  = StringFormat("%02d:%02d:%02d", dtSrv.hour, dtSrv.min, dtSrv.sec);
+   string gmtTimeStr  = StringFormat("%02d:%02d:%02d", dtGMT.hour, dtGMT.min, dtGMT.sec);
+   string offsetLabel = "GMT" + (detectedOffset >= 0 ? "+" : "") + IntegerToString(detectedOffset);
+   bool   offsetMatch = (detectedOffset == BrokerGMTOffset);
+
    double fast[1], slow[1];
    string trendStr = "FLAT";
    if(CopyBuffer(FastEMAHandle,0,1,1,fast)==1 && CopyBuffer(SlowEMAHandle,0,1,1,slow)==1)
@@ -1748,8 +1759,17 @@ void UpdateDisplay()
    PanelLabel("EqV",  vx, y+row*lh+rowTop, "$"+DoubleToString(equity,2)+"  (P/L:$"+DoubleToString(pnl,2)+")", eqClr); row++;
    PanelDivider("D1", x+2, y+row*lh+rowTop/2); row++;
 
-   PanelLabel("GMTL", px,     y+row*lh+rowTop, "GMT Hour  :", PANEL_TXT);
-   PanelLabel("GMTV", vx, y+row*lh+rowTop, DoubleToString(gmtH,1)+" (Offset:"+IntegerToString(BrokerGMTOffset)+")", PANEL_TXT); row++;
+   // ── BROKER TIME (auto-detected, DST-aware) ─────────────────────────────
+   PanelLabel("BkHd",  px, y+row*lh+rowTop, "BROKER TIME:", PANEL_GOLD); row++;
+   PanelLabel("BkSl",  px,     y+row*lh+rowTop, "Server Time:", PANEL_TXT);
+   PanelLabel("BkSv",  vx, y+row*lh+rowTop, srvTimeStr, PANEL_TXT); row++;
+   PanelLabel("BkGl",  px,     y+row*lh+rowTop, "GMT Time   :", PANEL_TXT);
+   PanelLabel("BkGv",  vx, y+row*lh+rowTop, gmtTimeStr, PANEL_TXT); row++;
+   PanelLabel("BkOl",  px,     y+row*lh+rowTop, "GMT Offset :", PANEL_TXT);
+   string offDisp = offsetLabel + (offsetMatch ? "" : "  [input:"+IntegerToString(BrokerGMTOffset)+"]");
+   PanelLabel("BkOv",  vx, y+row*lh+rowTop, offDisp, offsetMatch?PANEL_GOLD:PANEL_RED); row++;
+   PanelDivider("D1b", x+2, y+row*lh+rowTop/2); row++;
+   // ───────────────────────────────────────────────────────────────────────
    PanelLabel("SeL",  px,     y+row*lh+rowTop, "Session   :", PANEL_TXT);
    PanelLabel("SeV",  vx, y+row*lh+rowTop, inSess?"ACTIVE":"CLOSED", inSess?PANEL_GREEN:PANEL_RED); row++;
    PanelLabel("TrL",  px,     y+row*lh+rowTop, "Trend     :", PANEL_TXT);
