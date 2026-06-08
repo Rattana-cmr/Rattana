@@ -121,7 +121,7 @@ input bool   UseFVGFilter        = true;   // Require price to retrace into FVG
 input bool   UseFVGEntry         = true;   // Enter on FVG retracement
 input bool   UseIFVG             = true;   // Also detect Inverse FVGs
 input bool   UseCEentry          = true;   // Use CE (midpoint) as refined entry
-input int    FVGMaxAgeBars       = 30;     // Max age of FVG (bars) before invalid
+input int    FVGMaxAgeBars       = 50;     // Max age of FVG (bars) before invalid
 input int    MaxFVGsTracked      = 20;     // Max concurrent FVGs tracked
 input bool   UseFVGM5            = false;  // Also scan M5 FVGs
 
@@ -144,7 +144,7 @@ input group "══════════ [07] PREMIUM / DISCOUNT ENGINE ═�
 input bool   UsePremDiscFilter   = true;   // Require P/D filter
 input double DiscountZone        = 0.50;   // Max % for discount (buys ≤ this)
 input double PremiumZone         = 0.50;   // Min % for premium  (sells ≥ 1-this)
-input int    DealingRangeLookback= 20;     // Bars for dealing range
+input int    DealingRangeLookback= 60;     // H4 bars for dealing range (60 = ~15 days)
 
 //--- SESSION ENGINE -----------------------------------------------
 input group "══════════ [08] SESSION & KILLZONE ENGINE ══════════"
@@ -826,25 +826,74 @@ void RunBiasEngine()
    gBias.h4 = DetectStructureBias(PERIOD_H4, 40, BiasSwingLookback);
    gBias.h1 = DetectStructureBias(PERIOD_H1, 50, BiasSwingLookback);
 
-   // Dealing range from H4 for premium/discount
-   double h4High = iHigh(_Symbol, PERIOD_H4, 1);
-   double h4Low  = iLow (_Symbol, PERIOD_H4, 1);
-   for(int i = 2; i <= DealingRangeLookback; i++)
+   // Dealing range: first try swing-based (most recent H4 swing high/low pair)
+   // This ensures range captures the current move, not just a fixed window.
+   double drH = 0, drL = 0;
+   for(int i = 1; i <= DealingRangeLookback && (drH == 0 || drL == 0); i++)
    {
-      h4High = MathMax(h4High, iHigh(_Symbol, PERIOD_H4, i));
-      h4Low  = MathMin(h4Low,  iLow (_Symbol, PERIOD_H4, i));
+      if(drH == 0 && IsSwingHigh(PERIOD_H4, i, 2))
+         drH = iHigh(_Symbol, PERIOD_H4, i);
+      if(drL == 0 && IsSwingLow(PERIOD_H4, i, 2))
+         drL = iLow(_Symbol, PERIOD_H4, i);
    }
-   gDRHigh = h4High;
-   gDRLow  = h4Low;
+   // Include current (live) H4 bar in the range so price at new highs
+   // doesn't permanently read as "extreme premium".
+   double liveH4H = iHigh(_Symbol, PERIOD_H4, 0);
+   double liveH4L = iLow (_Symbol, PERIOD_H4, 0);
+   if(drH > 0 && drL > 0 && drH > drL)
+   {
+      gDRHigh = MathMax(drH, liveH4H);
+      gDRLow  = MathMin(drL, liveH4L);
+   }
+   else
+   {
+      // Fallback: max/min over full lookback including live bar
+      double fbH = liveH4H, fbL = liveH4L;
+      for(int i = 1; i <= DealingRangeLookback; i++)
+      {
+         fbH = MathMax(fbH, iHigh(_Symbol, PERIOD_H4, i));
+         fbL = MathMin(fbL, iLow (_Symbol, PERIOD_H4, i));
+      }
+      gDRHigh = fbH;
+      gDRLow  = fbL;
+   }
 }
 
 //===================================================================
 // SECTION 7 — [02] LIQUIDITY ENGINE
 //===================================================================
 
+void CompactLiqLevels()
+{
+   // Expire swept levels older than 48h and non-structural levels older than 7 days.
+   // Structural key levels (PDH/PDL/PWH/PWL) are never auto-expired here.
+   datetime now = TimeCurrent();
+   for(int i = 0; i < gLiqCount; i++)
+   {
+      if(!gLiqLevels[i].valid) continue;
+      string t = gLiqLevels[i].tag;
+      bool isKey = (t == "PDH" || t == "PDL" || t == "PWH" || t == "PWL");
+      // Remove swept levels after 48h
+      if(gLiqLevels[i].swept && (now - gLiqLevels[i].sweepTime) > 172800)
+         gLiqLevels[i].valid = false;
+      // Remove EQH/EQL/Asian/London levels after 7 days
+      if(!isKey && !gLiqLevels[i].swept && (now - gLiqLevels[i].formed) > 604800)
+         gLiqLevels[i].valid = false;
+   }
+   // Compact array in-place
+   int newCount = 0;
+   for(int i = 0; i < gLiqCount; i++)
+      if(gLiqLevels[i].valid) gLiqLevels[newCount++] = gLiqLevels[i];
+   gLiqCount = newCount;
+}
+
 void AddLiqLevel(double price, string tag)
 {
+   if(price <= 0) return;
+   // Auto-clean before attempting to add if array is getting full
+   if(gLiqCount >= 45) CompactLiqLevels();
    if(gLiqCount >= 60) return;
+
    for(int i = 0; i < gLiqCount; i++)
       if(MathAbs(gLiqLevels[i].price - price) < Pips(3) && gLiqLevels[i].tag == tag)
          return;   // already tracked
@@ -1080,8 +1129,8 @@ void ScanFVGs()
       double l1 = iLow (_Symbol, tf, i);
       double h1 = iHigh(_Symbol, tf, i);
 
-      // Bullish FVG
-      if(h3 < l1 && (gSweepBull || !UseFVGFilter))
+      // Bullish FVG — always scan; direction filter applied at entry in PriceInFVG()
+      if(h3 < l1)
       {
          SFVGZone z;
          z.bottom   = h3;
@@ -1099,10 +1148,10 @@ void ScanFVGs()
          continue;
       }
 
-      // Bearish FVG
+      // Bearish FVG — always scan; direction filter applied at entry
       double l1b = iLow(_Symbol,  tf, i + 2);
       double h1b = iHigh(_Symbol, tf, i);
-      if(l1b > h1b && (!gSweepBull || !UseFVGFilter))
+      if(l1b > h1b)
       {
          SFVGZone z;
          z.top      = l1b;
@@ -2329,10 +2378,15 @@ void UpdatePanel()
    // === FVG + PD ARRAY ===
    row++;
    LabelSet("ATLASP_F0",  "--- FVG & PD ARRAY -------------------", x, RowY(row++), COL_BLUE, 7);
-   int validFVG = 0;
-   for(int i = 0; i < gFVGCount; i++) if(gFVGs[i].valid && !gFVGs[i].mitigated) validFVG++;
+   int validFVG = 0, mitFVG = 0;
+   for(int i = 0; i < gFVGCount; i++)
+   {
+      if(gFVGs[i].valid && !gFVGs[i].mitigated) validFVG++;
+      else if(gFVGs[i].mitigated)               mitFVG++;
+   }
    LabelSet("ATLASP_F1L", "FVGs Active :", x, RowY(row), COL_TXT, 8);
-   LabelSet("ATLASP_F1V", IntegerToString(validFVG)+" active", vx, RowY(row++), validFVG>0?COL_GREEN:COL_TXT, 8);
+   LabelSet("ATLASP_F1V", IntegerToString(validFVG)+" active / "+IntegerToString(mitFVG)+" mitigated",
+            vx, RowY(row++), validFVG>0?COL_GREEN:COL_TXT, 8);
    int validOB = 0;
    for(int i = 0; i < gPDACount; i++) if(gPDAs[i].valid && !gPDAs[i].mitigated) validOB++;
    LabelSet("ATLASP_F2L", "OBs Active  :", x, RowY(row), COL_TXT, 8);
@@ -2395,7 +2449,7 @@ void UpdatePanel()
    color dclr = gSetupReady ? COL_GREEN : COL_RED;
    LabelSet("ATLASP_D1", gSetupReady ? "  TRADE READY: "+(gSetupBull?"LONG":"SHORT") : "  NO TRADE",
             x, RowY(row++), dclr, 9);
-   for(int i = 0; i < MathMin(gScore.failCount, 4); i++)
+   for(int i = 0; i < MathMin(gScore.failCount, 6); i++)
       LabelSet("ATLASP_DR"+IntegerToString(i), "  >> "+gScore.failReasons[i], x, RowY(row++), COL_RED, 7);
    if(gSetupReady)
       LabelSet("ATLASP_DM", "  Model: "+gTrade.model, x, RowY(row++), COL_GOLD, 7);
