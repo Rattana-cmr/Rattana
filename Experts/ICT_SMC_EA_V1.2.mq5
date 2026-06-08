@@ -738,8 +738,6 @@ bool IsCISD1M(bool &isBearish)
 //===================================================================//
 //  SWING DETECTION — H1 and M15                                     //
 //===================================================================//
-struct SwingCandidate { double price; int barIndex; };
-
 void FindSwingPointsH1(double &swHigh,double &swLow)
 {
    swHigh=0;swLow=0;
@@ -1757,7 +1755,6 @@ void UpdateDisplay()
 
    // V1.2: Filter Rejection Statistics
    PanelLabel("FRH",px,y+row*lh+rowTop,"FILTER REJECTIONS (today):",PANEL_GOLD); row++;
-   color hi=PANEL_RED, lo=PANEL_TXT;
    string rejBar = "HTF:"+IntegerToString(rejHTFLevel)
                   +" MSS:"+IntegerToString(rejMSS)
                   +" BOS:"+IntegerToString(rejBOS)
