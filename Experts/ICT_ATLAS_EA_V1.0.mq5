@@ -1628,12 +1628,14 @@ void CalcConfluenceScore(bool bullish)
    // Weekly bias
    if(!RequireWeeklyBias || (bullish ? gBias.weekly == BIAS_BULLISH : gBias.weekly == BIAS_BEARISH))
       gScore.weeklyBias = ScoreWeeklyBias;
-   else AddFailReason("Weekly Bias: " + BiasStr(gBias.weekly));
+   else AddFailReason("Weekly Bias: " + BiasStr(gBias.weekly) +
+                      (bullish ? " (need BULLISH)" : " (need BEARISH)"));
 
    // Daily bias
    if(!RequireDailyBias || (bullish ? gBias.daily == BIAS_BULLISH : gBias.daily == BIAS_BEARISH))
       gScore.dailyBias = ScoreDailyBias;
-   else AddFailReason("Daily Bias: " + BiasStr(gBias.daily));
+   else AddFailReason("Daily Bias: " + BiasStr(gBias.daily) +
+                      (bullish ? " (need BULLISH)" : " (need BEARISH)"));
 
    // Liquidity sweep
    if(!UseLiquidityEngine || (gSweepDone && gSweepBull == bullish))
@@ -2354,8 +2356,13 @@ void UpdatePanel()
             vx, RowY(row++), ConditionAllowsTrade()?COL_GREEN:COL_RED, 8);
    LabelSet("ATLASP_SE5L","P/D Zone    :", x, RowY(row), COL_TXT, 8);
    double pdpct = GetPremDiscPct() * 100.0;
-   LabelSet("ATLASP_SE5V", DoubleToString(pdpct,0)+"% "+(pdpct<=50?"DISCOUNT":"PREMIUM"),
-            vx, RowY(row++), COL_GOLD, 8);
+   string pdLabel;
+   if(pdpct > 100)      pdLabel = DoubleToString(pdpct,0)+"% EXTREME PREMIUM";
+   else if(pdpct < 0)   pdLabel = DoubleToString(pdpct,0)+"% EXTREME DISCOUNT";
+   else if(pdpct >= 50) pdLabel = DoubleToString(pdpct,0)+"% PREMIUM";
+   else                 pdLabel = DoubleToString(pdpct,0)+"% DISCOUNT";
+   color pdColor = (pdpct > 100 || pdpct < 0) ? COL_RED : COL_GOLD;
+   LabelSet("ATLASP_SE5V", pdLabel, vx, RowY(row++), pdColor, 8);
    if(UseSMTFilter)
    {
       LabelSet("ATLASP_SM1L","SMT Diverg  :", x, RowY(row), COL_TXT, 8);
@@ -2515,21 +2522,50 @@ void CheckForEntry()
    if(!CanTrade()) return;
    if(!gRisk.tradingAllowed) return;
 
-   // Try bullish and bearish setups
-   for(int dir = 0; dir < 2; dir++)
-   {
-      bool bull = (dir == 0);
-      gScore.failCount = 0;
+   // Determine the primary direction from HTF bias so the panel always
+   // shows the most relevant score/fail reasons even when no trade fires.
+   ENUM_ATLAS_BIAS combinedBias;
+   if(gBias.weekly == gBias.daily && gBias.weekly != BIAS_NEUTRAL)
+      combinedBias = gBias.weekly;
+   else if(gBias.weekly != BIAS_NEUTRAL)
+      combinedBias = gBias.weekly;
+   else
+      combinedBias = gBias.daily;
 
-      if(ValidateSetup(bull))
-      {
-         gSetupReady = true;
-         gSetupBull  = bull;
-         gCurGrade   = CalcGrade(gScore.total);
-         PlaceTrade(bull);
-         return;
-      }
+   bool preferBull = (combinedBias != BIAS_BEARISH);
+
+   // Evaluate primary direction first and save its score for the panel.
+   gScore.failCount = 0;
+   bool okPrimary = ValidateSetup(preferBull);
+   SScoreCard primaryScore = gScore;           // snapshot for panel display
+   ENUM_ATLAS_GRADE primaryGrade = CalcGrade(gScore.total);
+
+   if(okPrimary)
+   {
+      gSetupReady = true;
+      gSetupBull  = preferBull;
+      gCurGrade   = primaryGrade;
+      PlaceTrade(preferBull);
+      return;
    }
+
+   // Try opposite direction (counter-trend only when primary fails)
+   gScore.failCount = 0;
+   bool okSecond = ValidateSetup(!preferBull);
+
+   if(okSecond)
+   {
+      gSetupReady = true;
+      gSetupBull  = !preferBull;
+      gCurGrade   = CalcGrade(gScore.total);
+      PlaceTrade(!preferBull);
+      return;
+   }
+
+   // No trade — restore primary-direction score so the panel shows
+   // WHY the bias-aligned direction was rejected (not the opposite one).
+   gScore     = primaryScore;
+   gCurGrade  = primaryGrade;
    gSetupReady = false;
 }
 
