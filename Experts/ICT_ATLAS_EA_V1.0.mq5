@@ -624,13 +624,12 @@ void ApplySymbolPreset()
 
 int GetGMTOffset()
 {
-   if(!AutoGMTOffset) return BrokerGMTOffset;
-   // Approximate: compare local time to GMT via server time
-   datetime srvTime = TimeCurrent();
-   MqlDateTime dt;
-   TimeToStruct(srvTime, dt);
-   // Use BrokerGMTOffset as base if AutoGMT fails
-   return BrokerGMTOffset;
+   if(!AutoGMTOffset)
+      return BrokerGMTOffset;
+   // MQL5 built-in: TimeCurrent() = broker server time, TimeGMT() = actual UTC
+   // Their difference gives the true broker GMT offset.
+   int offset = (int)((TimeCurrent() - TimeGMT()) / 3600);
+   return offset;
 }
 
 datetime ToGMT(datetime t)
@@ -1680,11 +1679,22 @@ void CalcConfluenceScore(bool bullish)
    else AddFailReason("Weekly Bias: " + BiasStr(gBias.weekly) +
                       (bullish ? " (need BULLISH)" : " (need BEARISH)"));
 
-   // Daily bias
-   if(!RequireDailyBias || (bullish ? gBias.daily == BIAS_BULLISH : gBias.daily == BIAS_BEARISH))
+   // Daily bias — with H4+H1 override for NEUTRAL days:
+   //   Full score  : Daily direction matches
+   //   Half score  : Daily is NEUTRAL but H4 + H1 both confirm direction
+   //   Zero + fail : Daily actively opposes direction
+   bool dailyMatch    = bullish ? gBias.daily == BIAS_BULLISH : gBias.daily == BIAS_BEARISH;
+   bool dailyNeutral  = (gBias.daily == BIAS_NEUTRAL);
+   bool h4Confirm     = bullish ? gBias.h4 == BIAS_BULLISH : gBias.h4 == BIAS_BEARISH;
+   bool h1Confirm     = bullish ? gBias.h1 == BIAS_BULLISH : gBias.h1 == BIAS_BEARISH;
+   bool dailyOpposed  = !dailyMatch && !dailyNeutral;
+   if(!RequireDailyBias || dailyMatch)
       gScore.dailyBias = ScoreDailyBias;
+   else if(dailyNeutral && h4Confirm && h1Confirm)
+      gScore.dailyBias = ScoreDailyBias / 2;   // half credit: NEUTRAL + H4+H1 aligned
    else AddFailReason("Daily Bias: " + BiasStr(gBias.daily) +
-                      (bullish ? " (need BULLISH)" : " (need BEARISH)"));
+                      (dailyOpposed ? (bullish?" (OPPOSED-BEARISH)":" (OPPOSED-BULLISH)")
+                                    : (bullish?" (need BULLISH)":" (need BEARISH)")));
 
    // Liquidity sweep
    if(!UseLiquidityEngine || (gSweepDone && gSweepBull == bullish))
