@@ -1,7 +1,7 @@
 //+------------------------------------------------------------------+
-//|                                          ICT SMC EA V1.3          |
-//|          ICT SMART MONEY CONCEPTS — FULL MODEL V1.3              |
-//|    IMPROVED DETECTION · SMART ACTIVE MODE · FILTER SUMMARY       |
+//|                                          ICT SMC EA V1.4          |
+//|          ICT SMART MONEY CONCEPTS — FULL MODEL V1.4              |
+//|  SMART ACTIVE PLUS · EXPANDED SESSION · FILTER SUMMARY           |
 //|                Created By — RATTANA CHHORM                        |
 //+------------------------------------------------------------------+
 // V1.3 UPGRADE — Better algorithms, not disabled filters
@@ -13,11 +13,13 @@
 // [28] H1 Range: ATR-adaptive (effUseATRRange + effMinRangeATR)
 // [29] PrintFilterSummary() — cumulative report printed on deinit
 // [30] Cumulative rejection counters (never reset, full backtest view)
-// OTE SmartActive default: 0.60–0.85
-// Target SmartActive: 8–15 trades/day (all ICT confirmations preserved)
+// V1.4 UPGRADE — STYLE_SMART_ACTIVE_PLUS
+// [31] STYLE_SMART_ACTIVE_PLUS: all ICT ON, OTE 55-90%, score 45
+//      MSS/BOS confirm 1 bar, cooldown 5 min, BestHoursOnly OFF
+//      Target: 15–25 trades/day across all active sessions
 //+------------------------------------------------------------------+
 #property copyright "RATTANA CHHORM"
-#property version   "1.3"
+#property version   "1.4"
 #property strict
 #include <Trade/Trade.mqh>
 CTrade trade;
@@ -32,13 +34,14 @@ enum ENUM_TRADING_STYLE
    STYLE_CONSERVATIVE = 0, // Conservative: all filters strict, score 80
    STYLE_BALANCED     = 1, // Balanced: respects input toggles, score 70
    STYLE_AGGRESSIVE   = 2, // Aggressive: MSS/Trend off, wider OTE, score 50
-   STYLE_SMART_ACTIVE = 3, // Smart Active: all ICT ON, better detection, score 55 [NEW]
-   STYLE_ULTRA_ACTIVE = 4  // Ultra Active: filters minimal, max frequency
+   STYLE_SMART_ACTIVE      = 3, // Smart Active: all ICT ON, better detection, score 55
+   STYLE_SMART_ACTIVE_PLUS = 4, // Smart Active+: all ICT ON, OTE 55-90%, score 45, 15-25/day [NEW]
+   STYLE_ULTRA_ACTIVE      = 5  // Ultra Active: filters minimal, max frequency
 };
 
 //===================================================================//
 const int    MAGIC_NUMBER = 888777;
-const string EA_NAME      = "ICT SMC EA V1.3";
+const string EA_NAME      = "ICT SMC EA V1.4";
 
 //===================================================================//
 //  INPUTS
@@ -379,6 +382,22 @@ void ApplyTradingStyle()
          effBOSConf=2;                                  // 2 bars vs 3 — faster BOS
          effBodyThresh=0.60;                            // 60% body vs 65% — more triggers
          effUseATRRange=true; effMinRangeATR=0.8;       // adaptive range
+         break;
+
+      case STYLE_SMART_ACTIVE_PLUS:
+         // All ICT filters ON — maximum frequency with ICT logic preserved
+         effMinScore=45; effRiskPct=RiskPercent; effCooldown=5; effMinH1Range=10;
+         effOTEMin=0.55; effOTEMax=0.90;               // 55-90% OTE window
+         effUseMSSFilter=true;                          // MSS ON
+         effUseBOSFilter=true;                          // BOS ON
+         effRequireLiqSweep=false;                      // Liquidity optional
+         effUseDailyTrend=true;                         // Trend ON
+         effBestHoursOnly=false;                        // ALL active sessions
+         effUseH1RangeFilter=true;
+         effMSSConfirm=1;                               // 1 bar — fastest valid MSS
+         effBOSConf=1;                                  // 1 bar — earliest BOS confirm
+         effBodyThresh=0.55;                            // 55% body threshold
+         effUseATRRange=true; effMinRangeATR=0.6;       // ATR range, relaxed to 0.6x
          break;
 
       case STYLE_ULTRA_ACTIVE:
@@ -948,7 +967,7 @@ void PartialClosePosition(ulong ticket,double closeLots)
   MqlTradeRequest req={};MqlTradeResult res={};
   req.action=TRADE_ACTION_DEAL;req.symbol=_Symbol;req.volume=NormalizeDouble(closeLots,2);
   req.type=(pt==POSITION_TYPE_BUY)?ORDER_TYPE_SELL:ORDER_TYPE_BUY;req.price=curP;req.deviation=30;
-  req.magic=MAGIC_NUMBER;req.position=ticket;req.comment="ICT SMC V1.3 Partial TP";
+  req.magic=MAGIC_NUMBER;req.position=ticket;req.comment="ICT SMC V1.4 Partial TP";
   if(!OrderSend(req,res)) Print("Partial close failed: ",res.retcode); }
 
 void CheckPartialTP()
@@ -1069,7 +1088,7 @@ void PlaceTrade(bool isBuy=true)
   string reason=""; if(!IsBrokerOrderSafe(isBuy,entry,sl,tp,reason)){Print("BROKER: ",reason);cisd1MinConfirmed=false;return;}
   double volume=CalculateLotSize(slPts); if(volume<=0){Print("SKIP: lot=0");return;}
   Print("══ ",EA_NAME," | ",EnumToString(TradingStyle)," | ",(isBuy?"BUY":"SELL")," | Score=",lastTradeScore," | R:R=",DoubleToString(rr,2));
-  bool result=isBuy?trade.Buy(volume,_Symbol,entry,sl,tp,"ICT SMC BUY V1.3"):trade.Sell(volume,_Symbol,entry,sl,tp,"ICT SMC SELL V1.3");
+  bool result=isBuy?trade.Buy(volume,_Symbol,entry,sl,tp,"ICT SMC BUY V1.4"):trade.Sell(volume,_Symbol,entry,sl,tp,"ICT SMC SELL V1.4");
   if(result)
   { TodayTradeCount++;
     cisd5MinConfirmed=false;cisd1MinConfirmed=false;mssConfirmed=false;bosConfirmed=false;liquiditySweepDone=false;fvgCount1Min=-1;
@@ -1217,7 +1236,7 @@ void UpdateDisplay()
   PanelLabel("CLl",px,y+row*lh+rowTop,"ConLoss  :",PANEL_TXT); PanelLabel("CLv",vx,y+row*lh+rowTop,IntegerToString(consecutiveLosses)+"/"+IntegerToString(MaxConsecutiveLosses),consecutiveLosses>5?PANEL_RED:PANEL_TXT); row++;
   PanelLabel("WSl",px,y+row*lh+rowTop,"WinStreak:",PANEL_TXT); PanelLabel("WSv",vx,y+row*lh+rowTop,IntegerToString(consecutiveWins),consecutiveWins>0?PANEL_GREEN:PANEL_TXT); row++;
   // ICT Sequence
-  PanelLabel("SeqH",px,y+row*lh+rowTop,"ICT SMC V1.3 SEQUENCE:",PANEL_GOLD); row++;
+  PanelLabel("SeqH",px,y+row*lh+rowTop,"ICT SMC V1.4 SEQUENCE:",PANEL_GOLD); row++;
   string s1v=!HTFLevelRequired?"DISABLED":(htfLevelReached?"PASS":"WAIT"); color s1c=!HTFLevelRequired?PANEL_GOLD:(htfLevelReached?PANEL_GREEN:PANEL_TXT);
   PanelLabel("S1l",px,y+row*lh+rowTop,"[1] HTF Level :",PANEL_TXT); PanelLabel("S1v",vx,y+row*lh+rowTop,s1v,s1c); row++;
   string s2lbl=effUseMSSFilter?"[2] MSS H1    :":"[2] 5M CISD   :";
@@ -1282,7 +1301,7 @@ void UpdateDisplay()
   // Config
   PanelLabel("RkL",px,y+row*lh+rowTop,"Risk Mode  :",PANEL_TXT); PanelLabel("RkV",vx,y+row*lh+rowTop,EnumToString(RiskMode)+" "+DoubleToString(effRiskPct,2)+"%",PANEL_GOLD); row++;
   PanelLabel("TpL",px,y+row*lh+rowTop,"TP Mode    :",PANEL_TXT); PanelLabel("TpV",vx,y+row*lh+rowTop,EnumToString(TPMode),PANEL_GOLD); row++;
-  color stC=TradingStyle==STYLE_SMART_ACTIVE?PANEL_GREEN:TradingStyle==STYLE_ULTRA_ACTIVE?PANEL_RED:PANEL_GOLD;
+  color stC=TradingStyle==STYLE_SMART_ACTIVE_PLUS?PANEL_BLUE:TradingStyle==STYLE_SMART_ACTIVE?PANEL_GREEN:TradingStyle==STYLE_ULTRA_ACTIVE?PANEL_RED:PANEL_GOLD;
   PanelLabel("TSl",px,y+row*lh+rowTop,"Style      :",PANEL_TXT); PanelLabel("TSv",vx,y+row*lh+rowTop,EnumToString(TradingStyle),stC); row++;
   PanelLabel("CDl",px,y+row*lh+rowTop,"Cooldown   :",PANEL_TXT); PanelLabel("CDv",vx,y+row*lh+rowTop,IntegerToString(effCooldown)+"m | MSS conf:"+IntegerToString(effMSSConfirm)+" BOS conf:"+IntegerToString(effBOSConf),PANEL_GOLD); row++;
   PanelLabel("OTl",px,y+row*lh+rowTop,"OTE Range  :",PANEL_TXT); PanelLabel("OTv",vx,y+row*lh+rowTop,DoubleToString(effOTEMin*100,0)+"%-"+DoubleToString(effOTEMax*100,0)+"%"+(effUseATRRange?" ATR":""),PANEL_GOLD); row++;
@@ -1325,7 +1344,7 @@ int OnInit()
   ArrayResize(SwingLineNames,MaxSwingLines); for(int i=0;i<MaxSwingLines;i++) SwingLineNames[i]="";
   for(int i=0;i<4;i++) OTEObjectNames[i]="";
   Print("════════════════════════════════════════");
-  Print(EA_NAME," — ICT SMART MONEY CONCEPTS V1.3");
+  Print(EA_NAME," — ICT SMART MONEY CONCEPTS V1.4");
   Print("Style    : ",EnumToString(TradingStyle));
   Print("OTE      : ",DoubleToString(effOTEMin*100,0),"%-",DoubleToString(effOTEMax*100,0),"%");
   Print("MSS conf : ",effMSSConfirm," bars  BOS conf: ",effBOSConf," bars");
