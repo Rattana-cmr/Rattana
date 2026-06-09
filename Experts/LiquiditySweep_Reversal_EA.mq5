@@ -35,6 +35,13 @@ enum ENUM_POSITION_DIRECTION
    DIR_SHORT = 2
 };
 
+enum ENUM_BOS_MODE
+{
+   BOS_NORMAL  = 0,   // Swing point + close beyond required
+   BOS_RELAXED = 1,   // Swing point only (no close required)
+   BOS_BYPASS  = 2    // No confirmation — immediate entry after sweep
+};
+
 //+------------------------------------------------------------------+
 //| Input parameters – HIGH FREQUENCY OPTIMIZED                      |
 //+------------------------------------------------------------------+
@@ -63,6 +70,7 @@ input bool     InpDirectBOSEntry = true;
 input double   InpTP_R           = 1.5;
 input double   InpMinRR          = 1.2;
 input double   InpPartialTP_R    = 1.0;
+input double   InpMaxSlPips      = 15.0;  // Hard SL cap in pips (0 = no cap)
 
 input group "=== Trade Management ==="
 input int      InpMaxDailyTrades  = 30;
@@ -87,7 +95,7 @@ input double   InpMinATR          = 1.5;
 input double   InpMaxSpreadMultiplier = 2.0;
 
 input group "=== ULTRA MODE OPTIONS ==="
-input bool     InpUltraBypassBOS = true;
+input ENUM_BOS_MODE InpBOSMode   = BOS_BYPASS;
 
 input group "=== Performance Tracking ==="
 input bool     InpAutoDisablePoorSymbols = true;
@@ -259,7 +267,7 @@ int OnInit()
    Print("Aggressive Mode: ", EnumToString(InpAggressiveMode));
    Print("Correlation Filter: ", InpUseCorrelationFilter ? "ON (max " + IntegerToString(InpMaxCorrelatedPositions) + ")" : "OFF");
    Print("Max Open Positions: ", IntegerToString(InpMaxOpenPositions));
-   Print("ULTRA Bypass BOS: ", InpUltraBypassBOS ? "YES" : "NO");
+   Print("BOS Mode: ", EnumToString(InpBOSMode));
    Print("Session Filter (GMT): ", InpUseSessionFilter ? IntegerToString(InpSessionStartHour) + ":" + IntegerToString(InpSessionStartMin) + " - " + IntegerToString(InpSessionEndHour) + ":" + IntegerToString(InpSessionEndMin) : "OFF");
    Print("Debug Mode: ON - detailed logging enabled");
    Print("========================================");
@@ -472,15 +480,21 @@ bool CheckSession()
    int endMinutes = InpSessionEndHour * 60 + InpSessionEndMin;
    bool active = (currentMinutes >= startMinutes && currentMinutes < endMinutes);
 
+   // Log only when status changes — not every tick — to keep journal clean
    if(InpDebugMode)
    {
-      MqlDateTime dtLocal;
-      TimeToStruct(TimeCurrent(), dtLocal);
-      Print("Session Check: Broker Time = ", dtLocal.hour, ":", dtLocal.min,
-            " | GMT Time = ", dtGMT.hour, ":", dtGMT.min,
-            " | Session Start = ", InpSessionStartHour, ":", InpSessionStartMin,
-            " | End = ", InpSessionEndHour, ":", InpSessionEndMin,
-            " | Active = ", active ? "YES" : "NO");
+      static bool lastSessionActive = false;
+      if(active != lastSessionActive)
+      {
+         MqlDateTime dtLocal;
+         TimeToStruct(TimeCurrent(), dtLocal);
+         Print("Session ", active ? "OPEN" : "CLOSED",
+               " | Broker ", dtLocal.hour, ":", dtLocal.min,
+               " | GMT ", dtGMT.hour, ":", dtGMT.min,
+               " | Window ", InpSessionStartHour, ":", InpSessionStartMin,
+               " - ", InpSessionEndHour, ":", InpSessionEndMin);
+         lastSessionActive = active;
+      }
    }
    return active;
 }
@@ -710,6 +724,8 @@ void OnTick()
    if(globalDailyTrades >= InpMaxDailyTrades) return;
    if(globalDailyR >= InpMaxDailyNetR) return;
    if(globalDailyR <= InpMaxDailyLossR) return;
+   // Session is global — check once here, not per-symbol
+   if(!CheckSession()) return;
    activePositions = CountOpenPositions();
    if(activePositions >= InpMaxOpenPositions) return;
    if(InpShowDashboard) UpdateDashboard();
@@ -739,9 +755,7 @@ void ProcessSymbol(int idx)
    bool spreadOK = (spreadValue <= symbols[idx].spreadLimit);
    LogDecision(sym, "Spread", spreadOK, DoubleToString(spreadValue,1) + " / " + DoubleToString(symbols[idx].spreadLimit,1));
    if(!spreadOK) return;
-   bool sessionOK = CheckSession();
-   LogDecision(sym, "Session", sessionOK);
-   if(!sessionOK) return;
+   // Session already checked once in OnTick — no redundant per-symbol check here
    bool atrOK = CheckATR(idx);
    LogDecision(sym, "ATR", atrOK, DoubleToString(symbols[idx].atr / symbols[idx].pipSize,1) + " pips");
    if(!atrOK) return;
@@ -821,15 +835,20 @@ void FindSetup(int idx, ENUM_TIMEFRAMES tf)
    if(!trendOK) return;
 
    bool confirmed = false;
-   if(InpUltraBypassBOS && InpAggressiveMode == AGGRESSIVE_ULTRA)
+   switch(InpBOSMode)
    {
-      LogDecision(sym, "BOS", true, "ULTRA BYPASS - direct entry");
-      confirmed = true;
-   }
-   else
-   {
-      confirmed = CheckConfirmation(idx);
-      LogDecision(sym, "BOS", confirmed);
+      case BOS_BYPASS:
+         confirmed = true;
+         LogDecision(sym, "BOS", true, "BYPASS - direct entry");
+         break;
+      case BOS_RELAXED:
+         confirmed = CheckConfirmation(idx, true);
+         LogDecision(sym, "BOS", confirmed, "RELAXED - swing point only");
+         break;
+      default: // BOS_NORMAL
+         confirmed = CheckConfirmation(idx, false);
+         LogDecision(sym, "BOS", confirmed, "NORMAL - swing + close required");
+         break;
    }
    if(!confirmed) return;
 
@@ -858,7 +877,9 @@ void FindSetup(int idx, ENUM_TIMEFRAMES tf)
    ExecuteTrade(idx);
 }
 
-bool CheckConfirmation(int idx)
+// relaxedMode = true  → BOS_RELAXED: swing point only, no close-beyond required
+// relaxedMode = false → BOS_NORMAL:  swing point AND subsequent close beyond it
+bool CheckConfirmation(int idx, bool relaxedMode)
 {
    MqlRates m1[];
    datetime startTime = symbols[idx].sweepBarTime;
@@ -868,22 +889,33 @@ bool CheckConfirmation(int idx)
    ArraySetAsSeries(m1, true);
    bool bosConfirmed = false;
    int maxScan = MathMin(copied, 20);
+
    if(symbols[idx].setupDirection == DIR_SHORT)
    {
       for(int i = 2; i < maxScan - 2; i++)
+      {
          if(m1[i].low < m1[i-1].low && m1[i].low < m1[i+1].low)
+         {
+            if(relaxedMode) { bosConfirmed = true; break; }
             for(int j = 0; j < i && j < 10; j++)
                if(m1[j].close < m1[i].low) { bosConfirmed = true; break; }
+            if(bosConfirmed) break;
+         }
+      }
    }
    else
    {
       for(int i = 2; i < maxScan - 2; i++)
+      {
          if(m1[i].high > m1[i-1].high && m1[i].high > m1[i+1].high)
+         {
+            if(relaxedMode) { bosConfirmed = true; break; }
             for(int j = 0; j < i && j < 10; j++)
                if(m1[j].close > m1[i].high) { bosConfirmed = true; break; }
+            if(bosConfirmed) break;
+         }
+      }
    }
-   if(!bosConfirmed && InpAggressiveMode >= AGGRESSIVE_HIGH)
-      bosConfirmed = true;
    return bosConfirmed;
 }
 
@@ -915,15 +947,19 @@ bool CheckRiskAndEntry(int idx)
    symbols[idx].entryPrice = newEntry;
 
    double buffer = InpSlBufferPips * symbols[idx].pipSize;
+   // InpMaxSlPips == 0 means no cap; otherwise clamp SL distance to that pip count
+   double slCapPrice = (InpMaxSlPips > 0) ? InpMaxSlPips * symbols[idx].pipSize : DBL_MAX;
    double riskDistance = 0;
    if(symbols[idx].setupDirection == DIR_SHORT)
    {
-      symbols[idx].stopLoss = MathMin(symbols[idx].sweepExtreme + buffer, symbols[idx].entryPrice + 10 * symbols[idx].pipSize);
+      symbols[idx].stopLoss = MathMin(symbols[idx].sweepExtreme + buffer,
+                                      symbols[idx].entryPrice + slCapPrice);
       riskDistance = symbols[idx].stopLoss - symbols[idx].entryPrice;
    }
    else
    {
-      symbols[idx].stopLoss = MathMax(symbols[idx].sweepExtreme - buffer, symbols[idx].entryPrice - 10 * symbols[idx].pipSize);
+      symbols[idx].stopLoss = MathMax(symbols[idx].sweepExtreme - buffer,
+                                      symbols[idx].entryPrice - slCapPrice);
       riskDistance = symbols[idx].entryPrice - symbols[idx].stopLoss;
    }
    double minStop = 3 * symbols[idx].pipSize;
@@ -983,7 +1019,10 @@ void ExecuteTrade(int idx)
          for(int i = PositionsTotal() - 1; i >= 0; i--)
          {
             ulong ticket = PositionGetTicket(i);
-            if(ticket > 0 && PositionGetInteger(POSITION_IDENTIFIER) == positionId)
+            // Must select before reading properties — PositionGetTicket alone
+            // does not guarantee the context is set on all broker/build combos
+            if(ticket > 0 && PositionSelectByTicket(ticket) &&
+               PositionGetInteger(POSITION_IDENTIFIER) == (long)positionId)
             {
                if(symbols[idx].positionTicket == 0) symbols[idx].positionTicket = ticket;
                else if(symbols[idx].positionTicket2 == 0) symbols[idx].positionTicket2 = ticket;
@@ -995,7 +1034,7 @@ void ExecuteTrade(int idx)
       symbols[idx].entriesThisSweep++;
       symbols[idx].breakEvenActivated = false;
       symbols[idx].lastTradeTime = TimeCurrent();
-      globalDailyTrades++;
+      globalDailyTrades++;    // counts entries (opens), not completed trades — intentional
       symbols[idx].tradesToday++;
       if(InpDebugMode) Print(symbols[idx].name, " Trade executed. Daily trades: ", IntegerToString(globalDailyTrades));
    }
@@ -1165,7 +1204,7 @@ void CreateDashboard()
       ObjectSetInteger(0, "DB_Version", OBJPROP_COLOR,     clrGray);
       ObjectSetInteger(0, "DB_Version", OBJPROP_FONTSIZE,  8);
       ObjectSetString(0,  "DB_Version", OBJPROP_FONT,      "Arial");
-      ObjectSetString(0,  "DB_Version", OBJPROP_TEXT,      "v6.4 HF | Ultra BOS Bypass");
+      ObjectSetString(0,  "DB_Version", OBJPROP_TEXT,      "v6.5 HF | BOS: " + EnumToString(InpBOSMode));
    }
 }
 
@@ -1223,8 +1262,7 @@ void UpdateDashboard()
       "  7D avg: " + DoubleToString(tradeStats.avgTradesPerDay, 1) + "/d");
    line += 15;
    CreateOrUpdateLabel("DB_Sep", x + 8, y + line, 0, clrDimGray,
-      StringFormat("%-34s", ""));
-   ObjectSetInteger(0, "DB_Sep", OBJPROP_BGCOLOR, clrDimGray);
+      "- - - - - - - - - - - - - - - -");
    line += 12;
    CreateOrUpdateLabel("DB_SignalsTitle", x + 8, y + line, 0, clrGold, "-- ACTIVE SIGNALS --");
    line += 14;
