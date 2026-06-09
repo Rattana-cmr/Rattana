@@ -2362,23 +2362,25 @@ void UpdatePanel()
    // === HEADER (always visible) ===
    // ATLASP_BG created first so it sits behind all labels (z-order).
    // Height set to 0 here — no visual until ChartRedraw at the end.
-   RectSet("ATLASP_BG",  x-4, y-4, PANEL_W, 0,      COL_BG,  COL_BORDER);
-   RectSet("ATLASP_HDR", x-4, y-4, PANEL_W, lh + 6, COL_HDR, COL_BORDER);
-   LabelSet("ATLASP_T",   " ICT ATLAS EA V1.0", x,             RowY(row), COL_GOLD, 9);
-   LabelSet("ATLASP_BTN", gPanelCollapsed ? " [+]" : " [-]", x+PANEL_W-34, RowY(row), COL_GOLD, 9);
-   row = 2;
+   int hdrH = lh + 16;   // taller header bar — easier to click when collapsed
+   RectSet("ATLASP_BG",  x-4, y-4, PANEL_W, 0,    COL_BG,  COL_BORDER);
+   RectSet("ATLASP_HDR", x-4, y-4, PANEL_W, hdrH, COL_HDR, COL_BORDER);
+   LabelSet("ATLASP_T",   " ICT ATLAS EA V1.0", x,             y+4, COL_GOLD, 11);
+   LabelSet("ATLASP_BTN", gPanelCollapsed ? " [+]" : " [-]", x+PANEL_W-36, y+4, COL_GOLD, 11);
+   row = 3;   // leave room for the taller header
 
    if(gPanelCollapsed)
    {
-      ObjectSetInteger(0, "ATLASP_BG", OBJPROP_YSIZE, lh + 6);
+      ObjectSetInteger(0, "ATLASP_BG", OBJPROP_YSIZE, hdrH);
       ChartRedraw(0);
       return;
    }
 
-   // Creator credit + current symbol (below header, always first content row)
-   LabelSet("ATLASP_CR1", "  Created by: RATTANA CHHORM", x, RowY(row++), C'90,110,160', 7);
+   // Creator credit + current symbol (below header, always first content rows)
+   LabelSet("ATLASP_CR1", "  Created by: RATTANA CHHORM",
+            x, RowY(row++), C'220,220,220', 9);
    LabelSet("ATLASP_CR2", "  Symbol: " + _Symbol + "  |  " + EnumToString(_Period),
-            x, RowY(row++), COL_BORDER, 7);
+            x, RowY(row++), C'180,180,180', 8);
    row++;   // spacer
 
    // === BIAS ENGINE ===
