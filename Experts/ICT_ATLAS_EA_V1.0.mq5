@@ -311,6 +311,19 @@ input int    PanelX              = 12;     // Panel X position
 input int    PanelY              = 30;     // Panel Y position
 input bool   ShowStatPanel       = true;   // Show statistics section
 
+//--- DEBUG & RELAXED MODE -----------------------------------------
+input group "══════════ [28] DEBUG & RELAXED MODE ══════════"
+input bool   DebugLogs            = false; // Print detailed engine logs to Journal
+input bool   UseRelaxedMode       = false; // Relaxed mode — lower thresholds for diagnosis
+input int    RelaxedMinScore      = 50;    // Min score when relaxed mode is ON
+input bool   RelaxedMSSOptional   = true;  // MSS not required in relaxed mode
+input bool   RelaxedDispOptional  = true;  // Displacement not required in relaxed mode
+input bool   RelaxedDailyOptional = true;  // Daily bias not required in relaxed mode
+input bool   RelaxedWeeklyOptional= false; // Weekly bias not required in relaxed mode
+input bool   AllowFVGOnlyEntry    = false; // Allow Sweep+FVG entry (no MSS/Disp needed)
+input bool   AllowOBEntry         = false; // Allow OB-only entries (no full ICT sequence)
+input bool   ExpandKillzones      = false; // Expand sessions: add Asian, extend NY to 18:00
+
 //===================================================================
 // SECTION 3 — DATA STRUCTURES
 //===================================================================
@@ -548,8 +561,9 @@ int           gATR14    = INVALID_HANDLE;
 int           gADX14    = INVALID_HANDLE;
 
 // Panel
-int           gPanelX   = 12;
-int           gPanelY   = 30;
+int           gPanelX         = 12;
+int           gPanelY         = 30;
+bool          gPanelCollapsed = false;
 const int     PANEL_W   = 330;
 const int     PANEL_LH  = 14;
 color         COL_BG    = C'18,20,28';
@@ -997,22 +1011,28 @@ void RunLiquidityEngine()
 void RunMSSEngine()
 {
    if(!gSweepDone) { gMSS.valid = false; return; }
+   if(gMSS.valid)  return;   // persist once confirmed
 
-   // After a sweep, look for MSS on M15
-   // Bullish setup: after sell-side sweep, find swing high above current price
-   // MSS = close above that swing high
    ENUM_TIMEFRAMES tf = PERIOD_M15;
    double curClose = iClose(_Symbol, tf, 1);
    int    lb       = MSSLookbackBars;
 
+   if(DebugLogs)
+      Print("MSS scan — sweep=",gSweepBull?"BULL":"BEAR",
+            "  curClose=",DoubleToString(curClose,_Digits),
+            "  lookback=",lb," bars");
+
    if(gSweepBull)
    {
-      // Find most recent internal swing high before the sweep
       for(int i = 2; i < lb; i++)
       {
          if(IsSwingHigh(tf, i, MSSwingLookback))
          {
             double swH = iHigh(_Symbol, tf, i);
+            if(DebugLogs)
+               Print("MSS bull — swingH[",i,"]=",DoubleToString(swH,_Digits),
+                     "  close=",DoubleToString(curClose,_Digits),
+                     "  break=",curClose>swH?"YES":"NO");
             if(curClose > swH)
             {
                gMSS.bullish  = true;
@@ -1022,20 +1042,25 @@ void RunMSSEngine()
                gMSS.swingRef = swH;
                gMSS.valid    = true;
                if(DrawMSSLines) DrawMSSLine(swH, gMSS.time, true);
+               if(DebugLogs) Print("MSS CONFIRMED BULLISH at ",DoubleToString(swH,_Digits));
                return;
             }
             break;  // only check most recent swing
          }
       }
+      if(DebugLogs) Print("MSS FAIL — no bullish break of swing high in lookback window");
    }
    else
    {
-      // Bearish MSS: close below most recent internal swing low after buy-side sweep
       for(int i = 2; i < lb; i++)
       {
          if(IsSwingLow(tf, i, MSSwingLookback))
          {
             double swL = iLow(_Symbol, tf, i);
+            if(DebugLogs)
+               Print("MSS bear — swingL[",i,"]=",DoubleToString(swL,_Digits),
+                     "  close=",DoubleToString(curClose,_Digits),
+                     "  break=",curClose<swL?"YES":"NO");
             if(curClose < swL)
             {
                gMSS.bearish  = true;
@@ -1045,11 +1070,13 @@ void RunMSSEngine()
                gMSS.swingRef = swL;
                gMSS.valid    = true;
                if(DrawMSSLines) DrawMSSLine(swL, gMSS.time, false);
+               if(DebugLogs) Print("MSS CONFIRMED BEARISH at ",DoubleToString(swL,_Digits));
                return;
             }
             break;
          }
       }
+      if(DebugLogs) Print("MSS FAIL — no bearish break of swing low in lookback window");
    }
 }
 
@@ -1059,8 +1086,8 @@ void RunMSSEngine()
 
 void RunDisplacementEngine()
 {
-   gDisp.valid = false;
-   if(!gMSS.valid) return;
+   if(!gMSS.valid) { gDisp.valid = false; return; }
+   if(gDisp.valid) return;   // already confirmed — persist until sweep resets
 
    double atr = GetATRMain(1);
    if(atr <= 0) return;
@@ -1081,6 +1108,14 @@ void RunDisplacementEngine()
       double bodyPct  = body / range;
       double atrRatio = range / atr;
 
+      if(DebugLogs)
+         Print("DISP bar[",i,"] bodyPct=",DoubleToString(bodyPct,2),
+               " need>",DoubleToString(DispMinBodyPct,2),
+               "  atrRatio=",DoubleToString(atrRatio,2),
+               " need>",DoubleToString(DispMinATRMulti,2),
+               "  dir=",(gSweepBull?"bull":"bear"),
+               "  candle=",(c>o?"bull":"bear"));
+
       if(bodyPct  < DispMinBodyPct)   continue;
       if(atrRatio < DispMinATRMulti)  continue;
 
@@ -1098,9 +1133,18 @@ void RunDisplacementEngine()
          gDisp.time      = iTime(_Symbol, tf, i);
          gDisp.barIndex  = i;
          gDisp.valid     = true;
+         if(DebugLogs)
+            Print("DISP confirmed bar[",i,"] ",isBullDisp?"BULLISH":"BEARISH",
+                  " body=",DoubleToString(bodyPct*100,0),"%",
+                  " atr×",DoubleToString(atrRatio,2));
          return;
       }
    }
+
+   if(DebugLogs)
+      Print("DISP FAIL — no qualifying displacement candle in last ",lb," bars",
+            " (need body>",DoubleToString(DispMinBodyPct*100,0),"%",
+            " atr>",DoubleToString(DispMinATRMulti,2),"x)");
 }
 
 //===================================================================
@@ -1221,14 +1265,18 @@ bool PriceInFVG(bool bullish, double& fvgTop, double& fvgBot, double& fvgCE)
 void ScanOrderBlocks()
 {
    if(!PDA_UseOB) return;
+   if(!gSweepDone) return;   // need at least a liquidity sweep
    ENUM_TIMEFRAMES tf = PERIOD_M15;
-   if(!gDisp.valid) return;
 
-   int dispBar = gDisp.barIndex;
-   bool bullish = gDisp.bullish;
+   // Use displacement bar as anchor if confirmed, else scan recent bars
+   bool bullish = gSweepBull;
+   int  anchor  = gDisp.valid ? gDisp.barIndex : 1;
+   if(DebugLogs)
+      Print("OB scan — anchor bar=",anchor," dir=",bullish?"BULL":"BEAR",
+            " lookback=",OBLookbackBars);
 
-   // Search for last candle of opposite color before displacement
-   for(int i = dispBar + 1; i <= dispBar + OBLookbackBars; i++)
+   // Search for last candle of opposite color before the anchor
+   for(int i = anchor + 1; i <= anchor + OBLookbackBars; i++)
    {
       double o = iOpen (_Symbol, tf, i);
       double c = iClose(_Symbol, tf, i);
@@ -1239,7 +1287,6 @@ void ScanOrderBlocks()
 
       if(bullish && isBearish)
       {
-         // Bullish OB: last bearish candle before bullish displacement
          SPDArray pda;
          pda.type      = PDA_OB;
          pda.high      = h;
@@ -1249,13 +1296,18 @@ void ScanOrderBlocks()
          pda.valid     = true;
          pda.time      = iTime(_Symbol, tf, i);
          pda.objName   = "";
-         if(gPDACount < MaxPDAsTracked) gPDAs[gPDACount++] = pda;
-         if(DrawOBZones) DrawOBZone(gPDACount - 1);
+         if(gPDACount < MaxPDAsTracked)
+         {
+            gPDAs[gPDACount++] = pda;
+            if(DrawOBZones) DrawOBZone(gPDACount - 1);
+            if(DebugLogs)
+               Print("OB found BULLISH bar[",i,"] H=",DoubleToString(h,_Digits),
+                     " L=",DoubleToString(l,_Digits));
+         }
          break;
       }
       if(!bullish && isBullish)
       {
-         // Bearish OB
          SPDArray pda;
          pda.type      = PDA_OB;
          pda.high      = h;
@@ -1265,8 +1317,14 @@ void ScanOrderBlocks()
          pda.valid     = true;
          pda.time      = iTime(_Symbol, tf, i);
          pda.objName   = "";
-         if(gPDACount < MaxPDAsTracked) gPDAs[gPDACount++] = pda;
-         if(DrawOBZones) DrawOBZone(gPDACount - 1);
+         if(gPDACount < MaxPDAsTracked)
+         {
+            gPDAs[gPDACount++] = pda;
+            if(DrawOBZones) DrawOBZone(gPDACount - 1);
+            if(DebugLogs)
+               Print("OB found BEARISH bar[",i,"] H=",DoubleToString(h,_Digits),
+                     " L=",DoubleToString(l,_Digits));
+         }
          break;
       }
    }
@@ -1422,6 +1480,18 @@ ENUM_ATLAS_SESSION GetCurrentSession()
 }
 
 bool InKillzone() { return GetCurrentSession() != SES_NONE; }
+
+// Expanded killzone: all normal sessions + Asian + NY extended to 18:00 GMT
+bool InExpandedKillzone()
+{
+   if(InKillzone()) return true;
+   MqlDateTime dt;
+   TimeToStruct(ToGMT(TimeCurrent()), dt);
+   int h = dt.hour;
+   if(h >= 0  && h < 7)  return true;   // Asian session
+   if(h >= 13 && h < 18) return true;   // NY extended
+   return false;
+}
 
 void UpdateSessionRanges()
 {
@@ -1673,25 +1743,33 @@ void CalcConfluenceScore(bool bullish)
    gScore.total         = 0;
    gScore.failCount     = 0;
 
+   // In relaxed mode some filters become optional
+   bool relaxMSS    = UseRelaxedMode && RelaxedMSSOptional;
+   bool relaxDisp   = UseRelaxedMode && RelaxedDispOptional;
+   bool relaxDaily  = UseRelaxedMode && RelaxedDailyOptional;
+   bool relaxWeekly = UseRelaxedMode && RelaxedWeeklyOptional;
+   // AllowFVGOnlyEntry: enter with sweep+FVG alone
+   bool fvgOnly = AllowFVGOnlyEntry && gSweepDone && gSweepBull == bullish;
+
    // Weekly bias
-   if(!RequireWeeklyBias || (bullish ? gBias.weekly == BIAS_BULLISH : gBias.weekly == BIAS_BEARISH))
+   if(!RequireWeeklyBias || relaxWeekly ||
+      (bullish ? gBias.weekly == BIAS_BULLISH : gBias.weekly == BIAS_BEARISH))
       gScore.weeklyBias = ScoreWeeklyBias;
    else AddFailReason("Weekly Bias: " + BiasStr(gBias.weekly) +
                       (bullish ? " (need BULLISH)" : " (need BEARISH)"));
 
-   // Daily bias — with H4+H1 override for NEUTRAL days:
+   // Daily bias — H4-only override for NEUTRAL days (H1 no longer required):
    //   Full score  : Daily direction matches
-   //   Half score  : Daily is NEUTRAL but H4 + H1 both confirm direction
+   //   Half score  : Daily is NEUTRAL but H4 confirms direction
    //   Zero + fail : Daily actively opposes direction
    bool dailyMatch    = bullish ? gBias.daily == BIAS_BULLISH : gBias.daily == BIAS_BEARISH;
    bool dailyNeutral  = (gBias.daily == BIAS_NEUTRAL);
    bool h4Confirm     = bullish ? gBias.h4 == BIAS_BULLISH : gBias.h4 == BIAS_BEARISH;
-   bool h1Confirm     = bullish ? gBias.h1 == BIAS_BULLISH : gBias.h1 == BIAS_BEARISH;
    bool dailyOpposed  = !dailyMatch && !dailyNeutral;
-   if(!RequireDailyBias || dailyMatch)
+   if(!RequireDailyBias || relaxDaily || dailyMatch)
       gScore.dailyBias = ScoreDailyBias;
-   else if(dailyNeutral && h4Confirm && h1Confirm)
-      gScore.dailyBias = ScoreDailyBias / 2;   // half credit: NEUTRAL + H4+H1 aligned
+   else if(dailyNeutral && h4Confirm)
+      gScore.dailyBias = ScoreDailyBias / 2;   // half credit: NEUTRAL + H4 aligned
    else AddFailReason("Daily Bias: " + BiasStr(gBias.daily) +
                       (dailyOpposed ? (bullish?" (OPPOSED-BEARISH)":" (OPPOSED-BULLISH)")
                                     : (bullish?" (need BULLISH)":" (need BEARISH)")));
@@ -1702,12 +1780,14 @@ void CalcConfluenceScore(bool bullish)
    else AddFailReason("Liquidity Sweep: Missing");
 
    // MSS
-   if(!UseMSSFilter || (gMSS.valid && gMSS.bullish == bullish))
+   if(!UseMSSFilter || relaxMSS || fvgOnly ||
+      (gMSS.valid && gMSS.bullish == bullish))
       gScore.mss = ScoreMSS;
    else AddFailReason("MSS: Not confirmed");
 
    // Displacement
-   if(!UseDispFilter || (gDisp.valid && gDisp.bullish == bullish))
+   if(!UseDispFilter || relaxDisp || fvgOnly ||
+      (gDisp.valid && gDisp.bullish == bullish))
       gScore.displacement = ScoreDisplacement;
    else AddFailReason("Displacement: Not confirmed");
 
@@ -1718,8 +1798,9 @@ void CalcConfluenceScore(bool bullish)
       gScore.fvg = ScoreFVG;
    else AddFailReason("FVG: Price not in FVG");
 
-   // Killzone
-   if(!UseSessionFilter || InKillzone())
+   // Killzone / expanded killzone
+   bool inKZ = ExpandKillzones ? InExpandedKillzone() : InKillzone();
+   if(!UseSessionFilter || inKZ)
       gScore.killzone = ScoreKillzone;
    else AddFailReason("Killzone: Outside session");
 
@@ -1746,6 +1827,14 @@ void CalcConfluenceScore(bool bullish)
                   gScore.mss + gScore.displacement + gScore.fvg +
                   gScore.killzone + gScore.smt + gScore.adrScore +
                   gScore.po3 + gScore.premDisc;
+
+   if(DebugLogs)
+      Print("SCORE ",bullish?"BULL":"BEAR"," = ",gScore.total,"/",
+            ScoreWeeklyBias+ScoreDailyBias+ScoreLiqSweep+ScoreMSS+ScoreDisplacement+
+            ScoreFVG+ScoreKillzone+ScoreSMT+ScoreADR+ScorePO3+ScorePremDisc,
+            "  [W:",gScore.weeklyBias," D:",gScore.dailyBias," Liq:",gScore.liqSweep,
+            " MSS:",gScore.mss," Disp:",gScore.displacement," FVG:",gScore.fvg,
+            " KZ:",gScore.killzone," ADR:",gScore.adrScore," PD:",gScore.premDisc,"]");
 }
 
 ENUM_ATLAS_GRADE CalcGrade(int score)
@@ -1894,13 +1983,15 @@ bool ValidateSetup(bool bullish)
    CalcConfluenceScore(bullish);
    gCurGrade = CalcGrade(gScore.total);
 
-   if(UseScoringSystem && gScore.total < MinScore)
+   int effectiveMinScore = (UseRelaxedMode) ? RelaxedMinScore : MinScore;
+   if(UseScoringSystem && gScore.total < effectiveMinScore)
    {
-      AddFailReason("Score: " + IntegerToString(gScore.total) + " < " + IntegerToString(MinScore));
+      AddFailReason("Score: " + IntegerToString(gScore.total) + " < " + IntegerToString(effectiveMinScore) +
+                    (UseRelaxedMode ? " (RELAXED)" : ""));
       return false;
    }
 
-   if(!GradeAllowed(gCurGrade))
+   if(!UseRelaxedMode && !GradeAllowed(gCurGrade))
    {
       AddFailReason("Grade: " + GradeStr(gCurGrade) + " below minimum");
       return false;
@@ -2337,7 +2428,15 @@ color  PFColor(bool ok)  { return ok ? COL_PASS : COL_FAIL; }
 
 void UpdatePanel()
 {
-   if(!ShowPanel) return;
+   if(!ShowPanel) { DeletePanel(); return; }
+
+   // Rebuild all objects when collapse state changes to clear ghost labels
+   static bool prevCollapsed = false;
+   if(prevCollapsed != gPanelCollapsed)
+   {
+      DeletePanel();
+      prevCollapsed = gPanelCollapsed;
+   }
 
    int x  = gPanelX;
    int y  = gPanelY;
@@ -2346,15 +2445,30 @@ void UpdatePanel()
    int row = 0;
    gPanY = y; gPanLH = lh;
 
-   // === BACKGROUND ===
-   int totalH = 58 * lh + 14;
-   RectSet("ATLASP_BG",  x-4, y-4, PANEL_W, totalH, COL_BG, COL_BORDER);
-   RectSet("ATLASP_HDR", x-4, y-4, PANEL_W, lh + 6, COL_HDR, COL_BORDER);
-   LabelSet("ATLASP_T", " ICT ATLAS EA V1.0  |  " + _Symbol, x, RowY(row), COL_GOLD, 9);
-   row = 2;
+   // Taller header so the collapse button is easy to click
+   int hdrH = lh + 18;
+   RectSet("ATLASP_BG",  x-4, y-4, PANEL_W, 0,    COL_BG,  COL_BORDER);
+   RectSet("ATLASP_HDR", x-4, y-4, PANEL_W, hdrH, COL_HDR, COL_BORDER);
+   LabelSet("ATLASP_T",   " ICT ATLAS EA V1.0",      x,             y+4,  COL_GOLD, 11);
+   LabelSet("ATLASP_BTN", gPanelCollapsed?" [+]":" [-]", x+PANEL_W-36, y+4, COL_GOLD, 11);
+   row = 3;  // leave room for taller header
+
+   if(gPanelCollapsed)
+   {
+      ObjectSetInteger(0, "ATLASP_BG", OBJPROP_YSIZE, hdrH);
+      ChartRedraw(0);
+      return;
+   }
+
+   // Creator + symbol (always first content rows, compact, no spacer after)
+   LabelSet("ATLASP_CR1", "  Created by: RATTANA CHHORM",
+            x, RowY(row++), C'220,220,220', 10);
+   LabelSet("ATLASP_CR2", "  " + _Symbol + "  |  " + EnumToString(_Period) +
+            (UseRelaxedMode ? "  [RELAXED]" : ""),
+            x, RowY(row++), C'180,180,180', 9);
 
    // === BIAS ENGINE ===
-   LabelSet("ATLASP_B0",  "--- BIAS ENGINE ----------------------", x, RowY(row++), COL_BLUE, 7);
+   LabelSet("ATLASP_B0",  "--- BIAS ENGINE ---",  x, RowY(row++), COL_BLUE, 7);
    LabelSet("ATLASP_B1L", "Weekly Bias :", x, RowY(row), COL_TXT, 8);
    LabelSet("ATLASP_B1V", BiasStr(gBias.weekly), vx, RowY(row++),
             gBias.weekly==BIAS_BULLISH?COL_GREEN:gBias.weekly==BIAS_BEARISH?COL_RED:COL_GOLD, 8);
@@ -2375,8 +2489,7 @@ void UpdatePanel()
             vx, RowY(row++), COL_GOLD, 8);
 
    // === LIQUIDITY ===
-   row++;
-   LabelSet("ATLASP_L0",  "--- LIQUIDITY ------------------------", x, RowY(row++), COL_BLUE, 7);
+   LabelSet("ATLASP_L0",  "--- LIQUIDITY ---",  x, RowY(row++), COL_BLUE, 7);
    LabelSet("ATLASP_L1L", "Levels Track:", x, RowY(row), COL_TXT, 8);
    LabelSet("ATLASP_L1V", IntegerToString(gLiqCount)+" levels",   vx, RowY(row++), COL_GOLD, 8);
    LabelSet("ATLASP_L2L", "Sweep Done  :", x, RowY(row), COL_TXT, 8);
@@ -2384,18 +2497,17 @@ void UpdatePanel()
             vx, RowY(row++), gSweepDone?COL_GREEN:COL_FAIL, 8);
 
    // === STRUCTURE ===
-   row++;
-   LabelSet("ATLASP_S0",  "--- MARKET STRUCTURE -----------------", x, RowY(row++), COL_BLUE, 7);
+   LabelSet("ATLASP_S0",  "--- MARKET STRUCTURE ---",  x, RowY(row++), COL_BLUE, 7);
    LabelSet("ATLASP_S1L", "MSS         :", x, RowY(row), COL_TXT, 8);
    LabelSet("ATLASP_S1V", gMSS.valid?(gMSS.bullish?"BULLISH MSS":"BEARISH MSS"):"NONE",
             vx, RowY(row++), gMSS.valid?COL_GREEN:COL_FAIL, 8);
    LabelSet("ATLASP_S2L", "Displacement:", x, RowY(row), COL_TXT, 8);
-   LabelSet("ATLASP_S2V", gDisp.valid?(gDisp.bullish?"BULL DISP":"BEAR DISP"):"NONE",
+   LabelSet("ATLASP_S2V", gDisp.valid?(gDisp.bullish?"BULL DISP ("+DoubleToString(gDisp.bodyPct*100,0)+"%)":
+                           "BEAR DISP ("+DoubleToString(gDisp.bodyPct*100,0)+"%)"):"NONE",
             vx, RowY(row++), gDisp.valid?COL_GREEN:COL_FAIL, 8);
 
    // === FVG + PD ARRAY ===
-   row++;
-   LabelSet("ATLASP_F0",  "--- FVG & PD ARRAY -------------------", x, RowY(row++), COL_BLUE, 7);
+   LabelSet("ATLASP_F0",  "--- FVG & PD ARRAY ---",  x, RowY(row++), COL_BLUE, 7);
    int validFVG = 0, mitFVG = 0;
    for(int i = 0; i < gFVGCount; i++)
    {
@@ -2411,12 +2523,13 @@ void UpdatePanel()
    LabelSet("ATLASP_F2V", IntegerToString(validOB)+" active",  vx, RowY(row++), validOB>0?COL_GREEN:COL_TXT, 8);
 
    // === SESSION & FILTERS ===
-   row++;
-   LabelSet("ATLASP_SE0", "--- SESSION & FILTERS ----------------", x, RowY(row++), COL_BLUE, 7);
+   LabelSet("ATLASP_SE0", "--- SESSION & FILTERS ---",  x, RowY(row++), COL_BLUE, 7);
    ENUM_ATLAS_SESSION ses = GetCurrentSession();
-   string sesStr = ses==SES_ASIAN?"ASIAN KZ":ses==SES_LONDON?"LONDON KZ":ses==SES_NEWYORK?"NY KZ":"NO SESSION";
+   string sesStr = ses==SES_ASIAN?"ASIAN KZ":ses==SES_LONDON?"LONDON KZ":ses==SES_NEWYORK?"NY KZ":
+                   (ExpandKillzones&&InExpandedKillzone()?"EXPANDED KZ":"NO SESSION");
    LabelSet("ATLASP_SE1L","Session     :", x, RowY(row), COL_TXT, 8);
-   LabelSet("ATLASP_SE1V", sesStr, vx, RowY(row++), ses!=SES_NONE?COL_GREEN:COL_FAIL, 8);
+   LabelSet("ATLASP_SE1V", sesStr, vx, RowY(row++),
+            (ses!=SES_NONE||(ExpandKillzones&&InExpandedKillzone()))?COL_GREEN:COL_FAIL, 8);
    LabelSet("ATLASP_SE2L","ADR         :", x, RowY(row), COL_TXT, 8);
    LabelSet("ATLASP_SE2V", DoubleToString(gADR.completionPct*100,0)+"% ("+DoubleToString(gADR.adrPips,0)+"p)",
             vx, RowY(row++), gADR.blocked?COL_RED:COL_GREEN, 8);
@@ -2448,9 +2561,8 @@ void UpdatePanel()
                vx, RowY(row++), gPO3.valid?COL_GREEN:COL_GOLD, 8);
    }
 
-   // === CONFLUENCE SCORE ===
-   row++;
-   LabelSet("ATLASP_SC0", "--- CONFLUENCE SCORE -----------------", x, RowY(row++), COL_BLUE, 7);
+   // === CONFLUENCE SCORE — with per-component breakdown ===
+   LabelSet("ATLASP_SC0", "--- CONFLUENCE SCORE ---",  x, RowY(row++), COL_BLUE, 7);
    int maxScore = ScoreWeeklyBias+ScoreDailyBias+ScoreLiqSweep+ScoreMSS+
                   ScoreDisplacement+ScoreFVG+ScoreKillzone+ScoreSMT+ScoreADR+ScorePO3+ScorePremDisc;
    color sclr = gScore.total>=GradeAPlus?COL_GREEN:gScore.total>=GradeA?C'180,220,80':gScore.total>=GradeB?COL_GOLD:COL_RED;
@@ -2460,10 +2572,20 @@ void UpdatePanel()
    color gclr = gCurGrade==GRADE_APLUS?COL_GREEN:gCurGrade==GRADE_A?C'180,220,80':gCurGrade==GRADE_B?COL_GOLD:COL_RED;
    LabelSet("ATLASP_SC2L","Grade       :", x, RowY(row), COL_TXT, 9);
    LabelSet("ATLASP_SC2V", GradeStr(gCurGrade), vx, RowY(row++), gclr, 9);
+   // Breakdown line
+   LabelSet("ATLASP_SCB", "  W:"+IntegerToString(gScore.weeklyBias)+
+            " D:"+IntegerToString(gScore.dailyBias)+
+            " Liq:"+IntegerToString(gScore.liqSweep)+
+            " MSS:"+IntegerToString(gScore.mss)+
+            " Disp:"+IntegerToString(gScore.displacement)+
+            " FVG:"+IntegerToString(gScore.fvg)+
+            " KZ:"+IntegerToString(gScore.killzone)+
+            " ADR:"+IntegerToString(gScore.adrScore)+
+            " PD:"+IntegerToString(gScore.premDisc),
+            x, RowY(row++), C'140,140,180', 7);
 
    // === FINAL DECISION ===
-   row++;
-   LabelSet("ATLASP_D0", "--- FINAL DECISION -------------------", x, RowY(row++), COL_BLUE, 7);
+   LabelSet("ATLASP_D0", "--- FINAL DECISION ---",  x, RowY(row++), COL_BLUE, 7);
    color dclr = gSetupReady ? COL_GREEN : COL_RED;
    LabelSet("ATLASP_D1", gSetupReady ? "  TRADE READY: "+(gSetupBull?"LONG":"SHORT") : "  NO TRADE",
             x, RowY(row++), dclr, 9);
@@ -2473,8 +2595,7 @@ void UpdatePanel()
       LabelSet("ATLASP_DM", "  Model: "+gTrade.model, x, RowY(row++), COL_GOLD, 7);
 
    // === RISK STATE ===
-   row++;
-   LabelSet("ATLASP_R0",  "--- RISK STATE -----------------------", x, RowY(row++), COL_BLUE, 7);
+   LabelSet("ATLASP_R0",  "--- RISK STATE ---",  x, RowY(row++), COL_BLUE, 7);
    LabelSet("ATLASP_R1L", "Daily P&L   :", x, RowY(row), COL_TXT, 8);
    LabelSet("ATLASP_R1V", "$"+DoubleToString(gRisk.dailyPnL,2)+" ("+DoubleToString(gRisk.dailyR,2)+"R)",
             vx, RowY(row++), gRisk.dailyPnL>=0?COL_GREEN:COL_RED, 8);
@@ -2491,8 +2612,7 @@ void UpdatePanel()
    // === STATISTICS ===
    if(ShowStatPanel)
    {
-      row++;
-      LabelSet("ATLASP_ST0", "--- STATISTICS -----------------------", x, RowY(row++), COL_BLUE, 7);
+      LabelSet("ATLASP_ST0", "--- STATISTICS ---",  x, RowY(row++), COL_BLUE, 7);
       double wr = GetWinRate();
       LabelSet("ATLASP_ST1L","Trades      :", x, RowY(row), COL_TXT, 8);
       LabelSet("ATLASP_ST1V", IntegerToString(gStats.total)+" (W:"+IntegerToString(gStats.wins)+" L:"+IntegerToString(gStats.losses)+")",
@@ -2519,6 +2639,7 @@ void UpdatePanel()
       }
    }
 
+   // Resize background to exact content height
    ObjectSetInteger(0, "ATLASP_BG", OBJPROP_YSIZE, row * lh + 14);
    ChartRedraw(0);
 }
@@ -2741,12 +2862,27 @@ void OnTick()
    ManageTrades();
    CheckFridayClose();
    CheckForEntry();
-   UpdatePanel();
+   // Throttle panel redraws to max 2/sec — prevents tick-rate flash
+   static uint lastPanelMs = 0;
+   uint nowMs = GetTickCount();
+   if(nowMs - lastPanelMs >= 500)
+   {
+      lastPanelMs = nowMs;
+      UpdatePanel();
+   }
 }
 
 void OnChartEvent(const int id, const long& lp, const double& dp, const string& sp)
 {
-   // Panel drag support
+   // Collapse / expand toggle
+   if(id == CHARTEVENT_OBJECT_CLICK && sp == "ATLASP_BTN")
+   {
+      gPanelCollapsed = !gPanelCollapsed;
+      UpdatePanel();
+      return;
+   }
+
+   // Panel drag — click title to start, any other click to stop
    static bool dragging = false;
    static int  dxOff = 0, dyOff = 0;
 
