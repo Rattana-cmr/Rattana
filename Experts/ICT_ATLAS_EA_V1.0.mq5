@@ -2364,8 +2364,8 @@ void UpdatePanel()
    // Height set to 0 here — no visual until ChartRedraw at the end.
    RectSet("ATLASP_BG",  x-4, y-4, PANEL_W, 0,      COL_BG,  COL_BORDER);
    RectSet("ATLASP_HDR", x-4, y-4, PANEL_W, lh + 6, COL_HDR, COL_BORDER);
-   LabelSet("ATLASP_T",   " ICT ATLAS EA V1.0  |  " + _Symbol, x,              RowY(row), COL_GOLD, 9);
-   LabelSet("ATLASP_BTN", gPanelCollapsed ? " [+]" : " [-]",   x+PANEL_W-34,  RowY(row), COL_GOLD, 9);
+   LabelSet("ATLASP_T",   " ICT ATLAS EA V1.0", x,             RowY(row), COL_GOLD, 9);
+   LabelSet("ATLASP_BTN", gPanelCollapsed ? " [+]" : " [-]", x+PANEL_W-34, RowY(row), COL_GOLD, 9);
    row = 2;
 
    if(gPanelCollapsed)
@@ -2374,6 +2374,12 @@ void UpdatePanel()
       ChartRedraw(0);
       return;
    }
+
+   // Creator credit + current symbol (below header, always first content row)
+   LabelSet("ATLASP_CR1", "  Created by: RATTANA CHHORM", x, RowY(row++), C'90,110,160', 7);
+   LabelSet("ATLASP_CR2", "  Symbol: " + _Symbol + "  |  " + EnumToString(_Period),
+            x, RowY(row++), COL_BORDER, 7);
+   row++;   // spacer
 
    // === BIAS ENGINE ===
    LabelSet("ATLASP_B0",  "--- BIAS ENGINE ----------------------", x, RowY(row++), COL_BLUE, 7);
@@ -2768,7 +2774,15 @@ void OnTick()
    ManageTrades();
    CheckFridayClose();
    CheckForEntry();
-   UpdatePanel();
+
+   // Throttle panel redraws to max 2 per second — eliminates tick-rate flash
+   static uint lastPanelMs = 0;
+   uint nowMs = GetTickCount();
+   if(nowMs - lastPanelMs >= 500)
+   {
+      lastPanelMs = nowMs;
+      UpdatePanel();
+   }
 }
 
 void OnChartEvent(const int id, const long& lp, const double& dp, const string& sp)
