@@ -620,6 +620,9 @@ void ApplySymbolPreset()
       case SYM_BTCUSD: gEffMaxSL = 100;gEffMinSL = 20; break;
       default:         gEffMaxSL = MaxSLPips; gEffMinSL = MinSLPips; break;
    }
+   // User inputs always override the preset defaults
+   gEffMaxSL = MaxSLPips;
+   gEffMinSL = MinSLPips;
 }
 
 int GetGMTOffset()
@@ -1060,8 +1063,8 @@ void RunMSSEngine()
 
 void RunDisplacementEngine()
 {
-   gDisp.valid = false;
-   if(!gMSS.valid) return;
+   if(!gMSS.valid) { gDisp.valid = false; return; }
+   if(gDisp.valid) return;   // already confirmed, persist with sweep state
 
    double atr = GetATRMain(1);
    if(atr <= 0) return;
