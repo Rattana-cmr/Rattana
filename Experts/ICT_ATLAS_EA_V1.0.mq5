@@ -2381,7 +2381,6 @@ void UpdatePanel()
             x, RowY(row++), C'220,220,220', 9);
    LabelSet("ATLASP_CR2", "  Symbol: " + _Symbol + "  |  " + EnumToString(_Period),
             x, RowY(row++), C'180,180,180', 8);
-   row++;   // spacer
 
    // === BIAS ENGINE ===
    LabelSet("ATLASP_B0",  "--- BIAS ENGINE ----------------------", x, RowY(row++), COL_BLUE, 7);
@@ -2405,7 +2404,6 @@ void UpdatePanel()
             vx, RowY(row++), COL_GOLD, 8);
 
    // === LIQUIDITY ===
-   row++;
    LabelSet("ATLASP_L0",  "--- LIQUIDITY ------------------------", x, RowY(row++), COL_BLUE, 7);
    LabelSet("ATLASP_L1L", "Levels Track:", x, RowY(row), COL_TXT, 8);
    LabelSet("ATLASP_L1V", IntegerToString(gLiqCount)+" levels",   vx, RowY(row++), COL_GOLD, 8);
@@ -2414,7 +2412,6 @@ void UpdatePanel()
             vx, RowY(row++), gSweepDone?COL_GREEN:COL_FAIL, 8);
 
    // === STRUCTURE ===
-   row++;
    LabelSet("ATLASP_S0",  "--- MARKET STRUCTURE -----------------", x, RowY(row++), COL_BLUE, 7);
    LabelSet("ATLASP_S1L", "MSS         :", x, RowY(row), COL_TXT, 8);
    LabelSet("ATLASP_S1V", gMSS.valid?(gMSS.bullish?"BULLISH MSS":"BEARISH MSS"):"NONE",
@@ -2424,7 +2421,6 @@ void UpdatePanel()
             vx, RowY(row++), gDisp.valid?COL_GREEN:COL_FAIL, 8);
 
    // === FVG + PD ARRAY ===
-   row++;
    LabelSet("ATLASP_F0",  "--- FVG & PD ARRAY -------------------", x, RowY(row++), COL_BLUE, 7);
    int validFVG = 0, mitFVG = 0;
    for(int i = 0; i < gFVGCount; i++)
@@ -2441,7 +2437,6 @@ void UpdatePanel()
    LabelSet("ATLASP_F2V", IntegerToString(validOB)+" active",  vx, RowY(row++), validOB>0?COL_GREEN:COL_TXT, 8);
 
    // === SESSION & FILTERS ===
-   row++;
    LabelSet("ATLASP_SE0", "--- SESSION & FILTERS ----------------", x, RowY(row++), COL_BLUE, 7);
    ENUM_ATLAS_SESSION ses = GetCurrentSession();
    string sesStr = ses==SES_ASIAN?"ASIAN KZ":ses==SES_LONDON?"LONDON KZ":ses==SES_NEWYORK?"NY KZ":"NO SESSION";
@@ -2465,18 +2460,20 @@ void UpdatePanel()
    else                 pdLabel = DoubleToString(pdpct,0)+"% DISCOUNT";
    color pdColor = (pdpct > 100 || pdpct < 0) ? COL_RED : COL_GOLD;
    LabelSet("ATLASP_SE5V", pdLabel, vx, RowY(row++), pdColor, 8);
-   // SMT and PO3 always rendered (greyed out when filter disabled) — keeps row count fixed
-   LabelSet("ATLASP_SM1L","SMT Diverg  :", x, RowY(row), UseSMTFilter?COL_TXT:COL_BORDER, 8);
-   LabelSet("ATLASP_SM1V",
-            UseSMTFilter?(gSMT.valid?(gSMT.bullishDivergence?"BULL SMT":"BEAR SMT"):"NONE"):"DISABLED",
-            vx, RowY(row++), UseSMTFilter?(gSMT.valid?COL_GREEN:COL_TXT):COL_BORDER, 8);
-   LabelSet("ATLASP_PO1L","PO3 (AMD)   :", x, RowY(row), UsePO3Filter?COL_TXT:COL_BORDER, 8);
-   LabelSet("ATLASP_PO1V",
-            UsePO3Filter?(gPO3.valid?(gPO3.bullish?"BULL AMD":"BEAR AMD"):(gPO3.manipDone?"MANIP":"ACCUM")):"DISABLED",
-            vx, RowY(row++), UsePO3Filter?(gPO3.valid?COL_GREEN:COL_GOLD):COL_BORDER, 8);
+   if(UseSMTFilter)
+   {
+      LabelSet("ATLASP_SM1L","SMT Diverg  :", x, RowY(row), COL_TXT, 8);
+      LabelSet("ATLASP_SM1V", gSMT.valid?(gSMT.bullishDivergence?"BULL SMT":"BEAR SMT"):"NONE",
+               vx, RowY(row++), gSMT.valid?COL_GREEN:COL_TXT, 8);
+   }
+   if(UsePO3Filter)
+   {
+      LabelSet("ATLASP_PO1L","PO3 (AMD)   :", x, RowY(row), COL_TXT, 8);
+      LabelSet("ATLASP_PO1V", gPO3.valid?(gPO3.bullish?"BULL AMD":"BEAR AMD"):(gPO3.manipDone?"MANIP":"ACCUM"),
+               vx, RowY(row++), gPO3.valid?COL_GREEN:COL_GOLD, 8);
+   }
 
    // === CONFLUENCE SCORE ===
-   row++;
    LabelSet("ATLASP_SC0", "--- CONFLUENCE SCORE -----------------", x, RowY(row++), COL_BLUE, 7);
    int maxScore = ScoreWeeklyBias+ScoreDailyBias+ScoreLiqSweep+ScoreMSS+
                   ScoreDisplacement+ScoreFVG+ScoreKillzone+ScoreSMT+ScoreADR+ScorePO3+ScorePremDisc;
@@ -2489,25 +2486,16 @@ void UpdatePanel()
    LabelSet("ATLASP_SC2V", GradeStr(gCurGrade), vx, RowY(row++), gclr, 9);
 
    // === FINAL DECISION ===
-   row++;
    LabelSet("ATLASP_D0", "--- FINAL DECISION -------------------", x, RowY(row++), COL_BLUE, 7);
    color dclr = gSetupReady ? COL_GREEN : COL_RED;
    LabelSet("ATLASP_D1", gSetupReady ? "  TRADE READY: "+(gSetupBull?"LONG":"SHORT") : "  NO TRADE",
             x, RowY(row++), dclr, 9);
-   // Always 6 fail-reason slots — empty when unused so row count stays fixed
-   for(int i = 0; i < 6; i++)
-   {
-      bool hasReason = (i < MathMin(gScore.failCount, 6));
-      LabelSet("ATLASP_DR"+IntegerToString(i),
-               hasReason ? "  >> "+gScore.failReasons[i] : "",
-               x, RowY(row++), hasReason ? COL_RED : COL_BG, 7);
-   }
-   // Always 1 model slot
-   LabelSet("ATLASP_DM", gSetupReady?"  Model: "+gTrade.model:"",
-            x, RowY(row++), gSetupReady?COL_GOLD:COL_BG, 7);
+   for(int i = 0; i < MathMin(gScore.failCount, 6); i++)
+      LabelSet("ATLASP_DR"+IntegerToString(i), "  >> "+gScore.failReasons[i], x, RowY(row++), COL_RED, 7);
+   if(gSetupReady)
+      LabelSet("ATLASP_DM", "  Model: "+gTrade.model, x, RowY(row++), COL_GOLD, 7);
 
    // === RISK STATE ===
-   row++;
    LabelSet("ATLASP_R0",  "--- RISK STATE -----------------------", x, RowY(row++), COL_BLUE, 7);
    LabelSet("ATLASP_R1L", "Daily P&L   :", x, RowY(row), COL_TXT, 8);
    LabelSet("ATLASP_R1V", "$"+DoubleToString(gRisk.dailyPnL,2)+" ("+DoubleToString(gRisk.dailyR,2)+"R)",
@@ -2525,7 +2513,6 @@ void UpdatePanel()
    // === STATISTICS ===
    if(ShowStatPanel)
    {
-      row++;
       LabelSet("ATLASP_ST0", "--- STATISTICS -----------------------", x, RowY(row++), COL_BLUE, 7);
       double wr = GetWinRate();
       LabelSet("ATLASP_ST1L","Trades      :", x, RowY(row), COL_TXT, 8);
