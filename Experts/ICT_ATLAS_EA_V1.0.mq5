@@ -550,6 +550,7 @@ int           gADX14    = INVALID_HANDLE;
 // Panel
 int           gPanelX   = 12;
 int           gPanelY   = 30;
+bool          gPanelCollapsed = false;
 const int     PANEL_W   = 330;
 const int     PANEL_LH  = 14;
 color         COL_BG    = C'18,20,28';
@@ -2341,7 +2342,7 @@ color  PFColor(bool ok)  { return ok ? COL_PASS : COL_FAIL; }
 
 void UpdatePanel()
 {
-   if(!ShowPanel) return;
+   if(!ShowPanel) { DeletePanel(); return; }
 
    int x  = gPanelX;
    int y  = gPanelY;
@@ -2350,12 +2351,29 @@ void UpdatePanel()
    int row = 0;
    gPanY = y; gPanLH = lh;
 
-   // === BACKGROUND ===
-   int totalH = 58 * lh + 14;
-   RectSet("ATLASP_BG",  x-4, y-4, PANEL_W, totalH, COL_BG, COL_BORDER);
+   // Rebuild all objects when collapse state changes to clear ghost labels
+   static bool prevCollapsed = false;
+   if(prevCollapsed != gPanelCollapsed)
+   {
+      DeletePanel();
+      prevCollapsed = gPanelCollapsed;
+   }
+
+   // === HEADER (always visible) ===
+   // ATLASP_BG created first so it sits behind all labels (z-order).
+   // Height set to 0 here — no visual until ChartRedraw at the end.
+   RectSet("ATLASP_BG",  x-4, y-4, PANEL_W, 0,      COL_BG,  COL_BORDER);
    RectSet("ATLASP_HDR", x-4, y-4, PANEL_W, lh + 6, COL_HDR, COL_BORDER);
-   LabelSet("ATLASP_T", " ICT ATLAS EA V1.0  |  " + _Symbol, x, RowY(row), COL_GOLD, 9);
+   LabelSet("ATLASP_T",   " ICT ATLAS EA V1.0  |  " + _Symbol, x,              RowY(row), COL_GOLD, 9);
+   LabelSet("ATLASP_BTN", gPanelCollapsed ? " [+]" : " [-]",   x+PANEL_W-34,  RowY(row), COL_GOLD, 9);
    row = 2;
+
+   if(gPanelCollapsed)
+   {
+      ObjectSetInteger(0, "ATLASP_BG", OBJPROP_YSIZE, lh + 6);
+      ChartRedraw(0);
+      return;
+   }
 
    // === BIAS ENGINE ===
    LabelSet("ATLASP_B0",  "--- BIAS ENGINE ----------------------", x, RowY(row++), COL_BLUE, 7);
@@ -2439,18 +2457,15 @@ void UpdatePanel()
    else                 pdLabel = DoubleToString(pdpct,0)+"% DISCOUNT";
    color pdColor = (pdpct > 100 || pdpct < 0) ? COL_RED : COL_GOLD;
    LabelSet("ATLASP_SE5V", pdLabel, vx, RowY(row++), pdColor, 8);
-   if(UseSMTFilter)
-   {
-      LabelSet("ATLASP_SM1L","SMT Diverg  :", x, RowY(row), COL_TXT, 8);
-      LabelSet("ATLASP_SM1V", gSMT.valid?(gSMT.bullishDivergence?"BULL SMT":"BEAR SMT"):"NONE",
-               vx, RowY(row++), gSMT.valid?COL_GREEN:COL_TXT, 8);
-   }
-   if(UsePO3Filter)
-   {
-      LabelSet("ATLASP_PO1L","PO3 (AMD)   :", x, RowY(row), COL_TXT, 8);
-      LabelSet("ATLASP_PO1V", gPO3.valid?(gPO3.bullish?"BULL AMD":"BEAR AMD"):(gPO3.manipDone?"MANIP":"ACCUM"),
-               vx, RowY(row++), gPO3.valid?COL_GREEN:COL_GOLD, 8);
-   }
+   // SMT and PO3 always rendered (greyed out when filter disabled) — keeps row count fixed
+   LabelSet("ATLASP_SM1L","SMT Diverg  :", x, RowY(row), UseSMTFilter?COL_TXT:COL_BORDER, 8);
+   LabelSet("ATLASP_SM1V",
+            UseSMTFilter?(gSMT.valid?(gSMT.bullishDivergence?"BULL SMT":"BEAR SMT"):"NONE"):"DISABLED",
+            vx, RowY(row++), UseSMTFilter?(gSMT.valid?COL_GREEN:COL_TXT):COL_BORDER, 8);
+   LabelSet("ATLASP_PO1L","PO3 (AMD)   :", x, RowY(row), UsePO3Filter?COL_TXT:COL_BORDER, 8);
+   LabelSet("ATLASP_PO1V",
+            UsePO3Filter?(gPO3.valid?(gPO3.bullish?"BULL AMD":"BEAR AMD"):(gPO3.manipDone?"MANIP":"ACCUM")):"DISABLED",
+            vx, RowY(row++), UsePO3Filter?(gPO3.valid?COL_GREEN:COL_GOLD):COL_BORDER, 8);
 
    // === CONFLUENCE SCORE ===
    row++;
@@ -2471,10 +2486,17 @@ void UpdatePanel()
    color dclr = gSetupReady ? COL_GREEN : COL_RED;
    LabelSet("ATLASP_D1", gSetupReady ? "  TRADE READY: "+(gSetupBull?"LONG":"SHORT") : "  NO TRADE",
             x, RowY(row++), dclr, 9);
-   for(int i = 0; i < MathMin(gScore.failCount, 6); i++)
-      LabelSet("ATLASP_DR"+IntegerToString(i), "  >> "+gScore.failReasons[i], x, RowY(row++), COL_RED, 7);
-   if(gSetupReady)
-      LabelSet("ATLASP_DM", "  Model: "+gTrade.model, x, RowY(row++), COL_GOLD, 7);
+   // Always 6 fail-reason slots — empty when unused so row count stays fixed
+   for(int i = 0; i < 6; i++)
+   {
+      bool hasReason = (i < MathMin(gScore.failCount, 6));
+      LabelSet("ATLASP_DR"+IntegerToString(i),
+               hasReason ? "  >> "+gScore.failReasons[i] : "",
+               x, RowY(row++), hasReason ? COL_RED : COL_BG, 7);
+   }
+   // Always 1 model slot
+   LabelSet("ATLASP_DM", gSetupReady?"  Model: "+gTrade.model:"",
+            x, RowY(row++), gSetupReady?COL_GOLD:COL_BG, 7);
 
    // === RISK STATE ===
    row++;
@@ -2523,6 +2545,7 @@ void UpdatePanel()
       }
    }
 
+   // Set BG to exact content height — atomically with ChartRedraw so no flash
    ObjectSetInteger(0, "ATLASP_BG", OBJPROP_YSIZE, row * lh + 14);
    ChartRedraw(0);
 }
@@ -2750,7 +2773,15 @@ void OnTick()
 
 void OnChartEvent(const int id, const long& lp, const double& dp, const string& sp)
 {
-   // Panel drag support
+   // Toggle panel collapse on [-] / [+] button click
+   if(id == CHARTEVENT_OBJECT_CLICK && sp == "ATLASP_BTN")
+   {
+      gPanelCollapsed = !gPanelCollapsed;
+      UpdatePanel();
+      return;
+   }
+
+   // Panel drag — click on title bar to start, any other click to stop
    static bool dragging = false;
    static int  dxOff = 0, dyOff = 0;
 
