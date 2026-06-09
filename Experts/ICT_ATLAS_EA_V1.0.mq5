@@ -31,9 +31,9 @@
 #property version   "1.0"
 #property strict
 
-#include <Trade/Trade.mqh>
-#include <Trade/PositionInfo.mqh>
-#include <Trade/OrderInfo.mqh>
+#include <Trade\Trade.mqh>
+#include <Trade\PositionInfo.mqh>
+#include <Trade\OrderInfo.mqh>
 
 CTrade Trade;
 
