@@ -1084,50 +1084,24 @@ void ManagePositions(int idx)
 }
 
 //+------------------------------------------------------------------+
-//| Dashboard (compacted)                                            |
+//| Dashboard helpers                                                |
 //+------------------------------------------------------------------+
-void CreateDashboard()
+
+// Translate InpDashboardCorner + offsets into absolute top-left pixel
+// coords for the panel, then always use CORNER_LEFT_UPPER for every
+// object so text never renders off-screen and y always goes downward.
+int GetPanelX()
 {
-   DeleteDashboard();
-   int corner = InpDashboardCorner;
-   int x = InpDashboardXOffset;
-   int y = InpDashboardYOffset;
-   int width = 260;
-   int height = 220;
-   bool rectCreated = ObjectCreate(0, "DB_Rect", OBJ_RECTANGLE_LABEL, 0, 0, 0);
-   if(rectCreated)
-   {
-      ObjectSetInteger(0, "DB_Rect", OBJPROP_XDISTANCE, x);
-      ObjectSetInteger(0, "DB_Rect", OBJPROP_YDISTANCE, y);
-      ObjectSetInteger(0, "DB_Rect", OBJPROP_XSIZE, width);
-      ObjectSetInteger(0, "DB_Rect", OBJPROP_YSIZE, height);
-      ObjectSetInteger(0, "DB_Rect", OBJPROP_CORNER, corner);
-      ObjectSetInteger(0, "DB_Rect", OBJPROP_BGCOLOR, clrBlack);
-      ObjectSetInteger(0, "DB_Rect", OBJPROP_BORDER_COLOR, clrDarkGoldenrod);
-      ObjectSetInteger(0, "DB_Rect", OBJPROP_BACK, true);
-   }
-   bool titleCreated = ObjectCreate(0, "DB_Title", OBJ_LABEL, 0, 0, 0);
-   if(titleCreated)
-   {
-      ObjectSetInteger(0, "DB_Title", OBJPROP_XDISTANCE, x + 8);
-      ObjectSetInteger(0, "DB_Title", OBJPROP_YDISTANCE, y + 3);
-      ObjectSetInteger(0, "DB_Title", OBJPROP_CORNER, corner);
-      ObjectSetInteger(0, "DB_Title", OBJPROP_COLOR, clrGold);
-      ObjectSetInteger(0, "DB_Title", OBJPROP_FONTSIZE, 10);
-      ObjectSetString(0, "DB_Title", OBJPROP_FONT, "Arial Bold");
-      ObjectSetString(0, "DB_Title", OBJPROP_TEXT, "LIQUIDITY SWEEP EA PRO");
-   }
-   bool verCreated = ObjectCreate(0, "DB_Version", OBJ_LABEL, 0, 0, 0);
-   if(verCreated)
-   {
-      ObjectSetInteger(0, "DB_Version", OBJPROP_XDISTANCE, x + 8);
-      ObjectSetInteger(0, "DB_Version", OBJPROP_YDISTANCE, y + 18);
-      ObjectSetInteger(0, "DB_Version", OBJPROP_CORNER, corner);
-      ObjectSetInteger(0, "DB_Version", OBJPROP_COLOR, clrGray);
-      ObjectSetInteger(0, "DB_Version", OBJPROP_FONTSIZE, 8);
-      ObjectSetString(0, "DB_Version", OBJPROP_FONT, "Arial");
-      ObjectSetString(0, "DB_Version", OBJPROP_TEXT, "v6.4 HF | Ultra BOS Bypass");
-   }
+   if(InpDashboardCorner == 1 || InpDashboardCorner == 2)
+      return (int)(ChartGetInteger(0, CHART_WIDTH_IN_PIXELS) - InpDashboardXOffset - 264);
+   return InpDashboardXOffset;
+}
+
+int GetPanelY()
+{
+   if(InpDashboardCorner == 2 || InpDashboardCorner == 3)
+      return (int)(ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS) - InpDashboardYOffset - 230);
+   return InpDashboardYOffset;
 }
 
 void DeleteDashboard()
@@ -1140,7 +1114,7 @@ void CreateOrUpdateLabel(string name, int x, int y, int corner, color clr, strin
    if(ObjectFind(0, name) < 0)
    {
       ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
-      ObjectSetInteger(0, name, OBJPROP_CORNER, corner);
+      ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
       ObjectSetInteger(0, name, OBJPROP_FONTSIZE, 8);
       ObjectSetString(0, name, OBJPROP_FONT, "Consolas");
       ObjectSetInteger(0, name, OBJPROP_BACK, false);
@@ -1151,66 +1125,126 @@ void CreateOrUpdateLabel(string name, int x, int y, int corner, color clr, strin
    ObjectSetString(0, name, OBJPROP_TEXT, text);
 }
 
+//+------------------------------------------------------------------+
+//| Dashboard create / update                                        |
+//+------------------------------------------------------------------+
+void CreateDashboard()
+{
+   DeleteDashboard();
+   int x = GetPanelX();
+   int y = GetPanelY();
+   int width  = 264;
+   int height = 230;
+
+   if(ObjectCreate(0, "DB_Rect", OBJ_RECTANGLE_LABEL, 0, 0, 0))
+   {
+      ObjectSetInteger(0, "DB_Rect", OBJPROP_CORNER,       CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, "DB_Rect", OBJPROP_XDISTANCE,    x);
+      ObjectSetInteger(0, "DB_Rect", OBJPROP_YDISTANCE,    y);
+      ObjectSetInteger(0, "DB_Rect", OBJPROP_XSIZE,        width);
+      ObjectSetInteger(0, "DB_Rect", OBJPROP_YSIZE,        height);
+      ObjectSetInteger(0, "DB_Rect", OBJPROP_BGCOLOR,      clrBlack);
+      ObjectSetInteger(0, "DB_Rect", OBJPROP_BORDER_COLOR, clrDarkGoldenrod);
+      ObjectSetInteger(0, "DB_Rect", OBJPROP_BACK,         false);  // foreground: covers candles
+   }
+   if(ObjectCreate(0, "DB_Title", OBJ_LABEL, 0, 0, 0))
+   {
+      ObjectSetInteger(0, "DB_Title", OBJPROP_CORNER,    CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, "DB_Title", OBJPROP_XDISTANCE, x + 8);
+      ObjectSetInteger(0, "DB_Title", OBJPROP_YDISTANCE, y + 4);
+      ObjectSetInteger(0, "DB_Title", OBJPROP_COLOR,     clrGold);
+      ObjectSetInteger(0, "DB_Title", OBJPROP_FONTSIZE,  10);
+      ObjectSetString(0,  "DB_Title", OBJPROP_FONT,      "Arial Bold");
+      ObjectSetString(0,  "DB_Title", OBJPROP_TEXT,      "LIQUIDITY SWEEP EA PRO");
+   }
+   if(ObjectCreate(0, "DB_Version", OBJ_LABEL, 0, 0, 0))
+   {
+      ObjectSetInteger(0, "DB_Version", OBJPROP_CORNER,    CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, "DB_Version", OBJPROP_XDISTANCE, x + 8);
+      ObjectSetInteger(0, "DB_Version", OBJPROP_YDISTANCE, y + 18);
+      ObjectSetInteger(0, "DB_Version", OBJPROP_COLOR,     clrGray);
+      ObjectSetInteger(0, "DB_Version", OBJPROP_FONTSIZE,  8);
+      ObjectSetString(0,  "DB_Version", OBJPROP_FONT,      "Arial");
+      ObjectSetString(0,  "DB_Version", OBJPROP_TEXT,      "v6.4 HF | Ultra BOS Bypass");
+   }
+}
+
 void UpdateDashboard()
 {
    if(!InpShowDashboard) return;
-   int corner = InpDashboardCorner;
-   int x = InpDashboardXOffset;
-   int y = InpDashboardYOffset;
-   int line = 28;
+   int x = GetPanelX();
+   int y = GetPanelY();
+
+   // Keep rect anchored correctly after chart resize
+   ObjectSetInteger(0, "DB_Rect", OBJPROP_XDISTANCE, x);
+   ObjectSetInteger(0, "DB_Rect", OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, "DB_Title",   OBJPROP_XDISTANCE, x + 8);
+   ObjectSetInteger(0, "DB_Title",   OBJPROP_YDISTANCE, y + 4);
+   ObjectSetInteger(0, "DB_Version", OBJPROP_XDISTANCE, x + 8);
+   ObjectSetInteger(0, "DB_Version", OBJPROP_YDISTANCE, y + 18);
+
+   int line = 30;
    string modeText = "";
    switch(InpAggressiveMode)
    {
-      case AGGRESSIVE_OFF: modeText = "Conservative"; break;
-      case AGGRESSIVE_MEDIUM: modeText = "Medium"; break;
-      case AGGRESSIVE_HIGH: modeText = "Aggressive"; break;
-      case AGGRESSIVE_ULTRA: modeText = "ULTRA"; break;
+      case AGGRESSIVE_OFF:    modeText = "Conservative"; break;
+      case AGGRESSIVE_MEDIUM: modeText = "Medium";       break;
+      case AGGRESSIVE_HIGH:   modeText = "Aggressive";   break;
+      case AGGRESSIVE_ULTRA:  modeText = "ULTRA";        break;
    }
-   CreateOrUpdateLabel("DB_Mode", x + 8, y + line, corner, clrCyan, "Mode: " + modeText);
-   line += 14;
-   CreateOrUpdateLabel("DB_Trades", x + 8, y + line, corner, clrWhite,
+   CreateOrUpdateLabel("DB_Mode", x + 8, y + line, 0, clrCyan, "Mode: " + modeText);
+   line += 15;
+   CreateOrUpdateLabel("DB_Trades", x + 8, y + line, 0, clrWhite,
       "Trades: " + IntegerToString(globalDailyTrades) + "/" + IntegerToString(InpMaxDailyTrades));
-   line += 14;
-   CreateOrUpdateLabel("DB_Open", x + 8, y + line, corner, clrWhite,
+   line += 15;
+   CreateOrUpdateLabel("DB_Open", x + 8, y + line, 0, clrWhite,
       "Open: " + IntegerToString(activePositions) + "/" + IntegerToString(InpMaxOpenPositions));
-   line += 14;
+   line += 15;
    double dailyProfit = globalDailyR * (AccountInfoDouble(ACCOUNT_BALANCE) * InpRiskPercent / 100.0);
    color profitColor = (globalDailyR >= 0) ? clrLimeGreen : clrRed;
-   CreateOrUpdateLabel("DB_DailyR", x + 8, y + line, corner, profitColor,
+   CreateOrUpdateLabel("DB_DailyR", x + 8, y + line, 0, profitColor,
       "Daily R: " + DoubleToString(globalDailyR, 2) + " | $" + DoubleToString(dailyProfit, 0));
-   line += 14;
+   line += 15;
    double totalWinRate = 0, totalAvgRR = 0;
    int activeStatsSymbols = 0;
    for(int i = 0; i < ArraySize(symbols); i++)
       if(symbols[i].perf.totalTrades > 0)
-      { totalWinRate += symbols[i].perf.winRate; totalAvgRR += symbols[i].perf.avgRR; activeStatsSymbols++; }
+      {
+         totalWinRate += symbols[i].perf.winRate;
+         totalAvgRR   += symbols[i].perf.avgRR;
+         activeStatsSymbols++;
+      }
    if(activeStatsSymbols > 0) { totalWinRate /= activeStatsSymbols; totalAvgRR /= activeStatsSymbols; }
-   CreateOrUpdateLabel("DB_WinRate", x + 8, y + line, corner, clrCyan,
+   CreateOrUpdateLabel("DB_WinRate", x + 8, y + line, 0, clrCyan,
       "WR: " + DoubleToString(totalWinRate * 100, 1) + "% | RR: " + DoubleToString(totalAvgRR, 2));
-   line += 14;
-   CreateOrUpdateLabel("DB_LossStreak", x + 8, y + line, corner, clrYellow,
-      "Loss: " + IntegerToString(consecutiveLosses) + " | 7D: " + DoubleToString(tradeStats.avgTradesPerDay, 1) + "/d");
-   line += 14;
-   CreateOrUpdateLabel("DB_Sep", x + 8, y + line, corner, clrGray, "-----------------------------");
-   line += 14;
-   CreateOrUpdateLabel("DB_SignalsTitle", x + 8, y + line, corner, clrGold, "ACTIVE SIGNALS");
+   line += 15;
+   CreateOrUpdateLabel("DB_LossStreak", x + 8, y + line, 0, clrYellow,
+      "Loss streak: " + IntegerToString(consecutiveLosses) +
+      "  7D avg: " + DoubleToString(tradeStats.avgTradesPerDay, 1) + "/d");
+   line += 15;
+   CreateOrUpdateLabel("DB_Sep", x + 8, y + line, 0, clrDimGray,
+      StringFormat("%-34s", ""));
+   ObjectSetInteger(0, "DB_Sep", OBJPROP_BGCOLOR, clrDimGray);
+   line += 12;
+   CreateOrUpdateLabel("DB_SignalsTitle", x + 8, y + line, 0, clrGold, "-- ACTIVE SIGNALS --");
    line += 14;
    int signalCount = 0;
    for(int i = 0; i < ArraySize(symbols) && signalCount < 5; i++)
    {
-      string status = ""; color statusColor = clrWhite;
-      if(symbols[i].positionTicket != 0)      { status = "ACTIVE"; statusColor = clrLimeGreen; signalCount++; }
-      else if(symbols[i].setupValid)          { status = "SETUP";  statusColor = clrYellow;    signalCount++; }
-      else if(symbols[i].perf.isDisabled)     { status = "OFF";    statusColor = clrRed;       signalCount++; }
+      string status = "";
+      color  statusColor = clrWhite;
+      if(symbols[i].positionTicket != 0)  { status = "ACTIVE"; statusColor = clrLimeGreen; signalCount++; }
+      else if(symbols[i].setupValid)      { status = "SETUP";  statusColor = clrYellow;    signalCount++; }
+      else if(symbols[i].perf.isDisabled) { status = "OFF";    statusColor = clrRed;       signalCount++; }
       if(status != "")
       {
-         CreateOrUpdateLabel("DB_Sig" + IntegerToString(signalCount), x + 12, y + line, corner, statusColor,
-            symbols[i].name + " - " + status);
-         line += 12;
+         CreateOrUpdateLabel("DB_Sig" + IntegerToString(signalCount),
+            x + 12, y + line, 0, statusColor, symbols[i].name + "  " + status);
+         line += 13;
       }
    }
    if(signalCount == 0)
-      CreateOrUpdateLabel("DB_NoSignals", x + 12, y + line, corner, clrGray, "No active signals");
+      CreateOrUpdateLabel("DB_NoSignals", x + 12, y + line, 0, clrDimGray, "No active signals");
 }
 
 //+------------------------------------------------------------------+
