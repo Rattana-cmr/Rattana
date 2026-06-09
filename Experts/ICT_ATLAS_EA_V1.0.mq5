@@ -262,8 +262,8 @@ input bool   UseTrailingStop     = false;  // Enable trailing stop on runner
 input int    TrailStartPips      = 50;     // Trail start distance from entry
 input int    TrailStepPips       = 15;     // Trail step size
 input int    SLBufferPips        = 10;     // Extra pips added to SL
-input int    MaxSLPips           = 50;     // Max SL size (pips)
-input int    MinSLPips           = 8;      // Min SL size (pips)
+input int    MaxSLPips           = 80;     // Max SL size (pips)
+input int    MinSLPips           = 15;     // Min SL size (pips)
 
 //--- DAILY PROFIT LOCK -------------------------------------------
 input group "══════════ [23] DAILY PROFIT LOCK ══════════"
@@ -1884,6 +1884,13 @@ bool CanTrade()
 
 bool ValidateSetup(bool bullish)
 {
+   // Hard block: session/killzone must be active when filter is on
+   if(UseSessionFilter && !InKillzone())
+   {
+      AddFailReason("Killzone: Outside session");
+      return false;
+   }
+
    CalcConfluenceScore(bullish);
    gCurGrade = CalcGrade(gScore.total);
 
@@ -1911,7 +1918,8 @@ bool ValidateSetup(bool bullish)
       return false;
    }
 
-   return gScore.failCount == 0 || !UseScoringSystem;
+   // Score threshold is the gate — fail reasons are for panel display only
+   return true;
 }
 
 //===================================================================
