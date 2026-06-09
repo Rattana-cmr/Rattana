@@ -940,10 +940,10 @@ void FindSetup(int idx, ENUM_TIMEFRAMES tf)
 bool CheckConfirmation(int idx, bool relaxedMode)
 {
    MqlRates m1[];
-   datetime startTime = symbols[idx].sweepBarTime;
-   if(startTime == 0) startTime = TimeCurrent() - 600;
+   // Look back far enough to always have bars — sweepBarTime may be only seconds old
+   datetime startTime = TimeCurrent() - 1800; // 30 min back on M1 = 30 bars guaranteed
    int copied = CopyRates(symbols[idx].name, InpConfTF, startTime, TimeCurrent(), m1);
-   if(copied < 10) return false;
+   if(copied < 3) return false;
    ArraySetAsSeries(m1, true);
    bool bosConfirmed = false;
    int maxScan = MathMin(copied, 20);
@@ -979,29 +979,32 @@ bool CheckConfirmation(int idx, bool relaxedMode)
 
 bool CheckRiskAndEntry(int idx)
 {
-   MqlRates m1[];
-   datetime startTime = symbols[idx].sweepBarTime;
-   if(startTime == 0) startTime = TimeCurrent() - 600;
-   int copied = CopyRates(symbols[idx].name, InpConfTF, startTime, TimeCurrent(), m1);
-   if(copied < 10) return false;
-   ArraySetAsSeries(m1, true);
-
-   // Use current market price as entry so TP/SL are accurate relative to execution price
    MqlTick tick;
    if(!SymbolInfoTick(symbols[idx].name, tick)) return false;
+
+   // Entry: current market price — tick is always available, no bar history needed
    double newEntry = (symbols[idx].setupDirection == DIR_SHORT) ? tick.bid : tick.ask;
 
+   // FVG override — only fetch bars when actually enabled
    if(!InpDirectBOSEntry && InpUseFVG)
    {
-      for(int i = 0; i < MathMin(copied,15)-2; i++)
+      MqlRates m1[];
+      datetime fvgStart = TimeCurrent() - 1800; // look back 30 min max
+      int copied = CopyRates(symbols[idx].name, InpConfTF, fvgStart, TimeCurrent(), m1);
+      if(copied >= 3)
       {
-         if(symbols[idx].setupDirection == DIR_SHORT && m1[i].low > m1[i+2].high)
-         { newEntry = (m1[i].low + m1[i+2].high)/2.0; break; }
-         else if(symbols[idx].setupDirection == DIR_LONG && m1[i].high < m1[i+2].low)
-         { newEntry = (m1[i].high + m1[i+2].low)/2.0; break; }
+         ArraySetAsSeries(m1, true);
+         for(int i = 0; i < MathMin(copied, 15) - 2; i++)
+         {
+            if(symbols[idx].setupDirection == DIR_SHORT && m1[i].low > m1[i+2].high)
+            { newEntry = (m1[i].low + m1[i+2].high) / 2.0; break; }
+            else if(symbols[idx].setupDirection == DIR_LONG && m1[i].high < m1[i+2].low)
+            { newEntry = (m1[i].high + m1[i+2].low) / 2.0; break; }
+         }
       }
    }
-   if(newEntry == 0) newEntry = (symbols[idx].setupDirection == DIR_SHORT) ? tick.bid : tick.ask;
+
+   if(newEntry <= 0) newEntry = (symbols[idx].setupDirection == DIR_SHORT) ? tick.bid : tick.ask;
    symbols[idx].entryPrice = newEntry;
 
    double buffer = InpSlBufferPips * symbols[idx].pipSize;
@@ -1272,7 +1275,7 @@ void CreateDashboard()
       ObjectSetInteger(0, "DB_Version", OBJPROP_COLOR,     clrGray);
       ObjectSetInteger(0, "DB_Version", OBJPROP_FONTSIZE,  8);
       ObjectSetString(0,  "DB_Version", OBJPROP_FONT,      "Arial");
-      ObjectSetString(0,  "DB_Version", OBJPROP_TEXT,      "v6.6 HF | BOS: " + EnumToString(InpBOSMode));
+      ObjectSetString(0,  "DB_Version", OBJPROP_TEXT,      "v6.7 HF | BOS: " + EnumToString(InpBOSMode));
    }
 }
 
