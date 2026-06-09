@@ -74,6 +74,7 @@ input double   InpMaxSlPips      = 15.0;  // Hard SL cap in pips (0 = no cap)
 
 input group "=== Trade Management ==="
 input int      InpMaxDailyTrades  = 30;
+input int      InpMaxTradesPerSymbol = 0;  // per-symbol daily cap (0 = auto from global/symbols)
 input double   InpMaxDailyNetR    = 8.0;
 input double   InpMaxDailyLossR   = -3.0;
 input int      InpMaxOpenPositions = 12;
@@ -91,7 +92,7 @@ input ENUM_AGGRESSIVE_LEVEL InpAggressiveMode = AGGRESSIVE_ULTRA;
 input bool     InpAllowReEntry    = true;
 input int      InpMaxEntriesPerSweep = 3;
 input ENUM_TREND_FILTER InpTrendFilter = FILTER_NONE;
-input double   InpMinATR          = 1.5;
+input double   InpMinATR          = 1.0;
 input double   InpMaxSpreadMultiplier = 2.0;
 
 input group "=== ULTRA MODE OPTIONS ==="
@@ -100,7 +101,7 @@ input ENUM_BOS_MODE InpBOSMode   = BOS_BYPASS;
 input group "=== Performance Tracking ==="
 input bool     InpAutoDisablePoorSymbols = true;
 input double   InpMinWinRate       = 35.0;
-input int      InpMinTradesForDecision = 20;
+input int      InpMinTradesForDecision = 50;
 
 input group "=== Session Filter ==="
 input bool     InpUseSessionFilter = true;
@@ -183,6 +184,7 @@ struct SymbolData
    int             atrHandle;
    bool            partialClosed;
    bool            breakEvenActivated;
+   double          riskAmount2;      // risk stored for positionTicket2
    SymbolPerformance perf;
 };
 
@@ -193,6 +195,17 @@ struct TradeStats
    double   avgTradesPerSymbol;
    int      dailyHistory[30];
    datetime lastUpdate;
+};
+
+struct FilterStats
+{
+   int lpPass;      int lpFail;
+   int sweepPass;   int sweepFail;
+   int trendPass;   int trendFail;
+   int bosPass;     int bosFail;
+   int correlPass;  int correlFail;
+   int riskPass;    int riskFail;
+   int orderPass;   int orderFail;
 };
 
 //+------------------------------------------------------------------+
@@ -210,12 +223,26 @@ int            consecutiveLosses = 0;
 ulong          closedPositionsToday[];
 int            activePositions = 0;
 TradeStats     tradeStats;
+FilterStats    filterStats;          // lifetime totals — printed in OnDeinit
+int            dailyLpFound    = 0;  // resets each day — shown on dashboard
+int            dailySweepFound = 0;
+int            dailyBosConf    = 0;
+int            dailyRejections = 0;
 
 //+------------------------------------------------------------------+
 //| Logging helper                                                   |
 //+------------------------------------------------------------------+
 void LogDecision(string symbol, string step, bool passed, string detail = "")
 {
+   // Track lifetime filter stats regardless of debug mode
+   if(step == "LiquidityPool") { if(passed) { filterStats.lpPass++; dailyLpFound++; } else filterStats.lpFail++; }
+   else if(step == "Sweep")    { if(passed) { filterStats.sweepPass++; dailySweepFound++; } else filterStats.sweepFail++; }
+   else if(step == "Trend")    { if(passed) filterStats.trendPass++; else filterStats.trendFail++; }
+   else if(step == "BOS")      { if(passed) { filterStats.bosPass++; dailyBosConf++; } else filterStats.bosFail++; }
+   else if(step == "Correlation") { if(passed) filterStats.correlPass++; else { filterStats.correlFail++; dailyRejections++; } }
+   else if(step == "RiskCalc") { if(passed) filterStats.riskPass++; else { filterStats.riskFail++; dailyRejections++; } }
+   else if(step == "EntryApproved") { if(!passed) dailyRejections++; }
+
    if(!InpDebugMode) return;
    string status = passed ? "PASS" : "FAIL";
    string msg = symbol + " | " + step + " | " + status;
@@ -285,6 +312,22 @@ void OnDeinit(const int reason)
          IndicatorRelease(symbols[i].atrHandle);
    DeleteDashboard();
    Comment("");
+
+   int totalPass = filterStats.lpPass + filterStats.sweepPass + filterStats.bosPass +
+                   filterStats.correlPass + filterStats.riskPass + filterStats.orderPass;
+   int totalFail = filterStats.lpFail + filterStats.sweepFail + filterStats.trendFail +
+                   filterStats.bosFail + filterStats.correlFail + filterStats.riskFail + filterStats.orderFail;
+
+   Print("========== FILTER STATISTICS (lifetime) ==========");
+   Print(StringFormat("  LiquidityPool : PASS=%d  FAIL=%d", filterStats.lpPass,    filterStats.lpFail));
+   Print(StringFormat("  Sweep         : PASS=%d  FAIL=%d", filterStats.sweepPass, filterStats.sweepFail));
+   Print(StringFormat("  Trend         : PASS=%d  FAIL=%d", filterStats.trendPass, filterStats.trendFail));
+   Print(StringFormat("  BOS           : PASS=%d  FAIL=%d", filterStats.bosPass,   filterStats.bosFail));
+   Print(StringFormat("  Correlation   : PASS=%d  FAIL=%d", filterStats.correlPass,filterStats.correlFail));
+   Print(StringFormat("  RiskCalc      : PASS=%d  FAIL=%d", filterStats.riskPass,  filterStats.riskFail));
+   Print(StringFormat("  OrderSend     : PASS=%d  FAIL=%d", filterStats.orderPass, filterStats.orderFail));
+   Print(StringFormat("  TOTAL PASS=%d  TOTAL FAIL=%d", totalPass, totalFail));
+   Print("===================================================");
    Print("EA deinitialized");
 }
 
@@ -412,6 +455,7 @@ void InitSymbolData(int idx)
    symbols[idx].riskAmount = 0;
    symbols[idx].partialClosed = false;
    symbols[idx].breakEvenActivated = false;
+   symbols[idx].riskAmount2 = 0;
    symbols[idx].lastTradeTime = 0;
    symbols[idx].signalTime = 0;
    symbols[idx].totalLot = 0;
@@ -612,6 +656,10 @@ void UpdateDailyReset()
          symbols[i].tradesToday = 0;
          symbols[i].dailyR = 0;
       }
+      dailyLpFound    = 0;
+      dailySweepFound = 0;
+      dailyBosConf    = 0;
+      dailyRejections = 0;
       UpdateTradeStats();
       if(InpDebugMode) Print("Daily reset");
    }
@@ -649,6 +697,7 @@ void UpdateTradeStats()
 
 int GetSymbolDailyLimit()
 {
+   if(InpMaxTradesPerSymbol > 0) return InpMaxTradesPerSymbol;
    int activeSymbols = 0;
    for(int i = 0; i < ArraySize(symbols); i++)
       if(!symbols[i].perf.isDisabled) activeSymbols++;
@@ -787,7 +836,16 @@ void FindSetup(int idx, ENUM_TIMEFRAMES tf)
    double lpHigh = FindLiquidityPoolLevel(idx, true, tf);
    double lpLow = FindLiquidityPoolLevel(idx, false, tf);
 
-   if(lpHigh > 0 && close[0] < lpHigh && close[0] < open[0] && high[0] > lpHigh + sweepMin)
+   // BOS_BYPASS: skip body-direction check — any sweep candle qualifies
+   // BOS_NORMAL / BOS_RELAXED: require bearish/bullish close for quality filtering
+   bool checkBody = (InpBOSMode != BOS_BYPASS);
+
+   bool shortOK = (lpHigh > 0 && close[0] < lpHigh && high[0] > lpHigh + sweepMin &&
+                   (!checkBody || close[0] < open[0]));
+   bool longOK  = (lpLow  > 0 && close[0] > lpLow  && low[0]  < lpLow  - sweepMin &&
+                   (!checkBody || close[0] > open[0]));
+
+   if(shortOK)
    {
       LogDecision(sym, "LiquidityPool", true, "High pool at " + DoubleToString(lpHigh,5));
       LogDecision(sym, "Sweep", true, "Bearish sweep");
@@ -799,7 +857,7 @@ void FindSetup(int idx, ENUM_TIMEFRAMES tf)
       symbols[idx].signalTime = TimeCurrent();
       symbols[idx].partialClosed = false;
    }
-   else if(lpLow > 0 && close[0] > lpLow && close[0] > open[0] && low[0] < lpLow - sweepMin)
+   else if(longOK)
    {
       LogDecision(sym, "LiquidityPool", true, "Low pool at " + DoubleToString(lpLow,5));
       LogDecision(sym, "Sweep", true, "Bullish sweep");
@@ -813,7 +871,7 @@ void FindSetup(int idx, ENUM_TIMEFRAMES tf)
    }
    else
    {
-      LogDecision(sym, "LiquidityPool", false, "No pool");
+      LogDecision(sym, "LiquidityPool", false, "No pool / no sweep");
       return;
    }
 
@@ -1011,6 +1069,7 @@ void ExecuteTrade(int idx)
       result = symbolTrade.Buy(symbols[idx].totalLot, symbols[idx].name, tick.ask, symbols[idx].stopLoss, symbols[idx].takeProfit, InpComment);
    if(result)
    {
+      filterStats.orderPass++;
       ulong dealTicket = symbolTrade.ResultDeal();
       symbols[idx].dealTicket = dealTicket;
       if(dealTicket > 0 && HistoryDealSelect(dealTicket))
@@ -1019,13 +1078,19 @@ void ExecuteTrade(int idx)
          for(int i = PositionsTotal() - 1; i >= 0; i--)
          {
             ulong ticket = PositionGetTicket(i);
-            // Must select before reading properties — PositionGetTicket alone
-            // does not guarantee the context is set on all broker/build combos
             if(ticket > 0 && PositionSelectByTicket(ticket) &&
                PositionGetInteger(POSITION_IDENTIFIER) == (long)positionId)
             {
-               if(symbols[idx].positionTicket == 0) symbols[idx].positionTicket = ticket;
-               else if(symbols[idx].positionTicket2 == 0) symbols[idx].positionTicket2 = ticket;
+               if(symbols[idx].positionTicket == 0)
+               {
+                  symbols[idx].positionTicket = ticket;
+                  // riskAmount already set by CheckRiskAndEntry for this ticket
+               }
+               else if(symbols[idx].positionTicket2 == 0)
+               {
+                  symbols[idx].positionTicket2 = ticket;
+                  symbols[idx].riskAmount2 = symbols[idx].riskAmount; // same lot/risk as ticket1
+               }
                break;
             }
          }
@@ -1039,7 +1104,10 @@ void ExecuteTrade(int idx)
       if(InpDebugMode) Print(symbols[idx].name, " Trade executed. Daily trades: ", IntegerToString(globalDailyTrades));
    }
    else
+   {
+      filterStats.orderFail++;
       Print(symbols[idx].name, " Trade failed: ", symbolTrade.ResultRetcodeDescription());
+   }
    symbols[idx].setupValid = false;
 }
 
@@ -1139,7 +1207,7 @@ int GetPanelX()
 int GetPanelY()
 {
    if(InpDashboardCorner == 2 || InpDashboardCorner == 3)
-      return (int)(ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS) - InpDashboardYOffset - 230);
+      return (int)(ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS) - InpDashboardYOffset - 320);
    return InpDashboardYOffset;
 }
 
@@ -1173,7 +1241,7 @@ void CreateDashboard()
    int x = GetPanelX();
    int y = GetPanelY();
    int width  = 264;
-   int height = 230;
+   int height = 320;
 
    if(ObjectCreate(0, "DB_Rect", OBJ_RECTANGLE_LABEL, 0, 0, 0))
    {
@@ -1204,7 +1272,7 @@ void CreateDashboard()
       ObjectSetInteger(0, "DB_Version", OBJPROP_COLOR,     clrGray);
       ObjectSetInteger(0, "DB_Version", OBJPROP_FONTSIZE,  8);
       ObjectSetString(0,  "DB_Version", OBJPROP_FONT,      "Arial");
-      ObjectSetString(0,  "DB_Version", OBJPROP_TEXT,      "v6.5 HF | BOS: " + EnumToString(InpBOSMode));
+      ObjectSetString(0,  "DB_Version", OBJPROP_TEXT,      "v6.6 HF | BOS: " + EnumToString(InpBOSMode));
    }
 }
 
@@ -1217,6 +1285,7 @@ void UpdateDashboard()
    // Keep rect anchored correctly after chart resize
    ObjectSetInteger(0, "DB_Rect", OBJPROP_XDISTANCE, x);
    ObjectSetInteger(0, "DB_Rect", OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, "DB_Rect", OBJPROP_YSIZE,     320);
    ObjectSetInteger(0, "DB_Title",   OBJPROP_XDISTANCE, x + 8);
    ObjectSetInteger(0, "DB_Title",   OBJPROP_YDISTANCE, y + 4);
    ObjectSetInteger(0, "DB_Version", OBJPROP_XDISTANCE, x + 8);
@@ -1264,6 +1333,26 @@ void UpdateDashboard()
    CreateOrUpdateLabel("DB_Sep", x + 8, y + line, 0, clrDimGray,
       "- - - - - - - - - - - - - - - -");
    line += 12;
+   CreateOrUpdateLabel("DB_StatsTitle", x + 8, y + line, 0, clrGold, "-- TODAY'S PIPELINE --");
+   line += 13;
+   CreateOrUpdateLabel("DB_LpFound",  x + 8, y + line, 0, clrSilver,
+      "LP Found:   " + IntegerToString(dailyLpFound));
+   line += 13;
+   CreateOrUpdateLabel("DB_SwFound",  x + 8, y + line, 0, clrSilver,
+      "Sweeps:     " + IntegerToString(dailySweepFound));
+   line += 13;
+   CreateOrUpdateLabel("DB_BosConf",  x + 8, y + line, 0, clrSilver,
+      "BOS Conf:   " + IntegerToString(dailyBosConf));
+   line += 13;
+   CreateOrUpdateLabel("DB_Entries",  x + 8, y + line, 0, clrLimeGreen,
+      "Entries:    " + IntegerToString(globalDailyTrades));
+   line += 13;
+   CreateOrUpdateLabel("DB_Rejects",  x + 8, y + line, 0, (dailyRejections > 0 ? clrOrange : clrSilver),
+      "Rejected:   " + IntegerToString(dailyRejections));
+   line += 13;
+   CreateOrUpdateLabel("DB_Sep2", x + 8, y + line, 0, clrDimGray,
+      "- - - - - - - - - - - - - - - -");
+   line += 12;
    CreateOrUpdateLabel("DB_SignalsTitle", x + 8, y + line, 0, clrGold, "-- ACTIVE SIGNALS --");
    line += 14;
    int signalCount = 0;
@@ -1308,7 +1397,11 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
             {
                if(symbols[i].name == symbol)
                {
-                  double r = (symbols[i].riskAmount > 0) ? profit / symbols[i].riskAmount : 0;
+                  // Use the risk stored for the specific ticket that closed
+                  double closedRisk = (trans.position == symbols[i].positionTicket2 && symbols[i].riskAmount2 > 0)
+                                      ? symbols[i].riskAmount2
+                                      : symbols[i].riskAmount;
+                  double r = (closedRisk > 0) ? profit / closedRisk : 0;
                   symbols[i].dailyR += r;
                   symbols[i].perf.totalTrades++;
                   symbols[i].perf.totalR += r;
@@ -1321,8 +1414,8 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
                   globalDailyR += r;
                   if(r < 0) consecutiveLosses++;
                   else consecutiveLosses = 0;
-                  if(trans.position == symbols[i].positionTicket) symbols[i].positionTicket = 0;
-                  else if(trans.position == symbols[i].positionTicket2) symbols[i].positionTicket2 = 0;
+                  if(trans.position == symbols[i].positionTicket)       symbols[i].positionTicket  = 0;
+                  else if(trans.position == symbols[i].positionTicket2) { symbols[i].positionTicket2 = 0; symbols[i].riskAmount2 = 0; }
                   if(symbols[i].positionTicket == 0 && symbols[i].positionTicket2 == 0)
                      symbols[i].positionDirection = DIR_NONE;
                   UpdateTradeStats();
