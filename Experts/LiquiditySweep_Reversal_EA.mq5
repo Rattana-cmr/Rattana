@@ -216,6 +216,19 @@ void LogDecision(string symbol, string step, bool passed, string detail = "")
 }
 
 //+------------------------------------------------------------------+
+//| InitTradeStats — defined before OnInit to avoid forward-ref      |
+//+------------------------------------------------------------------+
+void InitTradeStats()
+{
+   tradeStats.tradesToday = 0;
+   tradeStats.avgTradesPerDay = 0;
+   tradeStats.avgTradesPerSymbol = 0;
+   tradeStats.lastUpdate = TimeCurrent();
+   for(int i = 0; i < 30; i++)
+      tradeStats.dailyHistory[i] = 0;
+}
+
+//+------------------------------------------------------------------+
 //| Initialization                                                   |
 //+------------------------------------------------------------------+
 int OnInit()
@@ -252,19 +265,6 @@ int OnInit()
    Print("========================================");
 
    return INIT_SUCCEEDED;
-}
-
-//+------------------------------------------------------------------+
-//| InitTradeStats                                                   |
-//+------------------------------------------------------------------+
-void InitTradeStats()
-{
-   tradeStats.tradesToday = 0;
-   tradeStats.avgTradesPerDay = 0;
-   tradeStats.avgTradesPerSymbol = 0;
-   tradeStats.lastUpdate = TimeCurrent();
-   for(int i = 0; i < 30; i++)
-      tradeStats.dailyHistory[i] = 0;
 }
 
 //+------------------------------------------------------------------+
