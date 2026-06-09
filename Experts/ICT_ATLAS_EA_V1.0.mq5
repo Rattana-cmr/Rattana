@@ -946,13 +946,20 @@ void RunLiquidityEngine()
                AddLiqLevel((swingL[a] + swingL[b]) * 0.5, "EQL");
    }
 
-   // Check for sweeps on current bar
+   // Expire stale sweep state (4-hour window)
+   if(gSweepDone && TimeCurrent() - gSweepTime > 4 * 3600)
+   {
+      gSweepDone = false;
+      gMSS.valid = false;
+      gDisp.valid = false;
+   }
+
+   // Check for new sweeps on the just-completed bar
    double barHigh  = iHigh (_Symbol, PERIOD_M15, 1);
    double barLow   = iLow  (_Symbol, PERIOD_M15, 1);
-   double barClose = iClose (_Symbol, PERIOD_M15, 1);
+   double barClose = iClose(_Symbol, PERIOD_M15, 1);
    double minWick  = Pips(SweepWickMinPips);
 
-   gSweepDone = false;
    for(int i = 0; i < gLiqCount; i++)
    {
       if(!gLiqLevels[i].valid || gLiqLevels[i].swept) continue;
@@ -961,9 +968,9 @@ void RunLiquidityEngine()
       // Sell-side sweep: wick below, close back above → bullish setup
       if(barLow < lvl - minWick && barClose > lvl)
       {
-         gLiqLevels[i].swept      = true;
+         gLiqLevels[i].swept       = true;
          gLiqLevels[i].bullishSweep = true;
-         gLiqLevels[i].sweepTime  = iTime(_Symbol, PERIOD_M15, 1);
+         gLiqLevels[i].sweepTime   = iTime(_Symbol, PERIOD_M15, 1);
          gSweepDone = true;
          gSweepBull = true;
          gSweepTime = gLiqLevels[i].sweepTime;
@@ -972,22 +979,16 @@ void RunLiquidityEngine()
       // Buy-side sweep: wick above, close back below → bearish setup
       else if(barHigh > lvl + minWick && barClose < lvl)
       {
-         gLiqLevels[i].swept      = true;
+         gLiqLevels[i].swept       = true;
          gLiqLevels[i].bullishSweep = false;
-         gLiqLevels[i].sweepTime  = iTime(_Symbol, PERIOD_M15, 1);
+         gLiqLevels[i].sweepTime   = iTime(_Symbol, PERIOD_M15, 1);
          gSweepDone = true;
          gSweepBull = false;
          gSweepTime = gLiqLevels[i].sweepTime;
          if(DrawLiqSweeps) DrawSweepMark(lvl, iTime(_Symbol, PERIOD_M15, 1), false);
       }
    }
-   // Reset sweep state after too many bars (stale)
-   if(gSweepDone && TimeCurrent() - gSweepTime > 4 * 3600)
-   {
-      gSweepDone = false;
-      gMSS.valid = false;
-      gDisp.valid = false;
-   }
+   // gSweepDone persists across bars until stale timer expires or explicit reset
 }
 
 //===================================================================
