@@ -264,6 +264,8 @@ input int    TrailStepPips       = 15;     // Trail step size
 input int    SLBufferPips        = 10;     // Extra pips added to SL
 input int    MaxSLPips           = 80;     // Max SL size (pips)
 input int    MinSLPips           = 15;     // Min SL size (pips)
+input bool   UseLocalSwingSL     = true;   // Use local swing high/low for SL (not PDH/PDL)
+input int    SwingLookback       = 5;      // Bars back to find local swing for SL
 
 //--- DAILY PROFIT LOCK -------------------------------------------
 input group "══════════ [23] DAILY PROFIT LOCK ══════════"
@@ -327,6 +329,8 @@ input bool   AllowContinuation   = true;   // Allow trade without sweep when bia
 input bool   ExpandKillzones     = false;  // Expand each session window by ±2 hours
 input bool   ScalperMode         = false;  // Scalper mode (further relaxed thresholds)
 input int    ScalperMinScore     = 40;     // Minimum score in scalper mode
+input int    AggrMaxSLPips       = 200;    // Max SL pips in aggressive mode
+input bool   AggrAllowGradeB     = true;   // Allow Grade B trades in aggressive mode
 
 //===================================================================
 // SECTION 3 — DATA STRUCTURES
@@ -528,11 +532,6 @@ int           gLiqCount    = 0;
 bool          gSweepDone   = false;
 bool          gSweepBull   = false;   // true = sell-side sweep (bullish setup)
 datetime      gSweepTime   = 0;
-// Per-type sweep tracking for dashboard diagnostics
-bool          gSweptPDH = false, gSweptPDL = false;
-bool          gSweptPWH = false, gSweptPWL = false;
-bool          gSweptAsianH = false, gSweptAsianL = false;
-bool          gSweptEQH = false, gSweptEQL = false;
 SMSSState     gMSS;
 SDispState    gDisp;
 SFVGZone      gFVGs[20];
@@ -572,7 +571,6 @@ int           gADX14    = INVALID_HANDLE;
 // Panel
 int           gPanelX   = 12;
 int           gPanelY   = 30;
-bool          gPanelCollapsed = false;
 const int     PANEL_W   = 330;
 const int     PANEL_LH  = 14;
 color         COL_BG    = C'18,20,28';
@@ -593,22 +591,30 @@ bool          gSetupReady     = false;
 bool          gSetupBull      = false;
 ENUM_ATLAS_GRADE gCurGrade    = GRADE_NONE;
 
+// SL source and signal tracking
+string        gSLSource        = "";       // SL source label (PDH/PDL/Local High/Local Low)
+double        gLastSLPips      = 0.0;      // Last calculated SL size in pips
+double        gLastEntryPrice  = 0.0;      // Last calculated entry price
+double        gLastSLPrice     = 0.0;      // Last calculated SL price
+int           gSignalsFound    = 0;        // Total validated setups found
+int           gSignalsRejected = 0;        // Setups blocked (SL, etc.)
+int           gSignalsExecuted = 0;        // Trades actually placed
+
+// Per-type sweep tracking
+bool gSweptPDH=false, gSweptPDL=false;
+bool gSweptPWH=false, gSweptPWL=false;
+bool gSweptAsianH=false, gSweptAsianL=false;
+bool gSweptEQH=false, gSweptEQL=false;
+
+// Per-section panel collapse state
+bool gSecBias=true, gSecSweep=true, gSecChain=true, gSecFVG=false;
+bool gSecFilter=true, gSecSession=false, gSecScore=true;
+bool gSecDecision=true, gSecRisk=true, gSecStats=false;
+
 // Panel row helper state (avoids lambda)
 int           gPanY  = 0;
 int           gPanLH = PANEL_LH;
 int           RowY(int r) { return gPanY + r * gPanLH + 2; }
-
-// Per-section collapse states (true = expanded)
-bool gSecBias     = true;
-bool gSecSweep    = true;
-bool gSecChain    = true;
-bool gSecFVG      = false;
-bool gSecFilter   = true;
-bool gSecSession  = false;
-bool gSecScore    = true;
-bool gSecDecision = true;
-bool gSecRisk     = true;
-bool gSecStats    = false;
 
 // Effective symbol params (set by preset)
 double        gPipFactor   = 10.0;
@@ -636,6 +642,10 @@ void SetupPipFactor()
 
 void ApplySymbolPreset()
 {
+   // Always respect user's MaxSLPips / MinSLPips inputs
+   gEffMaxSL = MaxSLPips;
+   gEffMinSL = MinSLPips;
+   // Pip scale by symbol
    ENUM_ATLAS_SYMPRESET p = SymPreset;
    if(p == SYM_AUTO)
    {
@@ -648,16 +658,13 @@ void ApplySymbolPreset()
    }
    switch(p)
    {
-      case SYM_XAUUSD: gEffMaxSL = 50; gEffMinSL = 8;  break;
-      case SYM_EURUSD: gEffMaxSL = 30; gEffMinSL = 5;  break;
-      case SYM_GBPUSD: gEffMaxSL = 35; gEffMinSL = 5;  break;
-      case SYM_USDJPY: gEffMaxSL = 30; gEffMinSL = 5;  break;
-      case SYM_BTCUSD: gEffMaxSL = 100;gEffMinSL = 20; break;
-      default:         gEffMaxSL = MaxSLPips; gEffMinSL = MinSLPips; break;
+      case SYM_XAUUSD: break; // pip factor already set by SetupPipFactor()
+      case SYM_EURUSD: break;
+      case SYM_GBPUSD: break;
+      case SYM_USDJPY: break;
+      case SYM_BTCUSD: break;
+      default: break;
    }
-   // User inputs always override the preset defaults
-   gEffMaxSL = MaxSLPips;
-   gEffMinSL = MinSLPips;
 }
 
 int GetGMTOffset()
@@ -984,77 +991,48 @@ void RunLiquidityEngine()
                AddLiqLevel((swingL[a] + swingL[b]) * 0.5, "EQL");
    }
 
-   bool aggrMode = AggressiveMode || ScalperMode;
+   // Check for sweeps on current bar
+   double barHigh  = iHigh (_Symbol, PERIOD_M15, 1);
+   double barLow   = iLow  (_Symbol, PERIOD_M15, 1);
+   double barClose = iClose (_Symbol, PERIOD_M15, 1);
+   double minWick  = Pips(SweepWickMinPips);
 
-   // Expire stale sweep state (8h aggressive / 4h conservative)
-   int expirySecs = aggrMode ? 8 * 3600 : 4 * 3600;
-   if(gSweepDone && TimeCurrent() - gSweepTime > expirySecs)
+   gSweepDone = false;
+   for(int i = 0; i < gLiqCount; i++)
+   {
+      if(!gLiqLevels[i].valid || gLiqLevels[i].swept) continue;
+      double lvl = gLiqLevels[i].price;
+
+      // Sell-side sweep: wick below, close back above → bullish setup
+      if(barLow < lvl - minWick && barClose > lvl)
+      {
+         gLiqLevels[i].swept      = true;
+         gLiqLevels[i].bullishSweep = true;
+         gLiqLevels[i].sweepTime  = iTime(_Symbol, PERIOD_M15, 1);
+         gSweepDone = true;
+         gSweepBull = true;
+         gSweepTime = gLiqLevels[i].sweepTime;
+         if(DrawLiqSweeps) DrawSweepMark(lvl, iTime(_Symbol, PERIOD_M15, 1), true);
+      }
+      // Buy-side sweep: wick above, close back below → bearish setup
+      else if(barHigh > lvl + minWick && barClose < lvl)
+      {
+         gLiqLevels[i].swept      = true;
+         gLiqLevels[i].bullishSweep = false;
+         gLiqLevels[i].sweepTime  = iTime(_Symbol, PERIOD_M15, 1);
+         gSweepDone = true;
+         gSweepBull = false;
+         gSweepTime = gLiqLevels[i].sweepTime;
+         if(DrawLiqSweeps) DrawSweepMark(lvl, iTime(_Symbol, PERIOD_M15, 1), false);
+      }
+   }
+   // Reset sweep state after too many bars (stale)
+   if(gSweepDone && TimeCurrent() - gSweepTime > 4 * 3600)
    {
       gSweepDone = false;
       gMSS.valid = false;
       gDisp.valid = false;
-      gSweptPDH=false; gSweptPDL=false; gSweptPWH=false; gSweptPWL=false;
-      gSweptAsianH=false; gSweptAsianL=false; gSweptEQH=false; gSweptEQL=false;
    }
-
-   // Minimum wick: 0.5p aggressive, SweepWickMinPips conservative
-   double minWick = Pips(aggrMode ? MathMin(0.5, SweepWickMinPips) : SweepWickMinPips);
-   // Scan more bars in aggressive mode
-   int scanBars = aggrMode ? 5 : 2;
-
-   for(int bar = 1; bar <= scanBars; bar++)
-   {
-      double barHigh  = iHigh (_Symbol, PERIOD_M15, bar);
-      double barLow   = iLow  (_Symbol, PERIOD_M15, bar);
-      double barClose = iClose(_Symbol, PERIOD_M15, bar);
-
-      for(int i = 0; i < gLiqCount; i++)
-      {
-         if(!gLiqLevels[i].valid || gLiqLevels[i].swept) continue;
-         double lvl  = gLiqLevels[i].price;
-         string tag  = gLiqLevels[i].tag;
-
-         // Sell-side sweep: wick below, close back above → bullish setup
-         if(barLow < lvl - minWick && barClose > lvl)
-         {
-            gLiqLevels[i].swept        = true;
-            gLiqLevels[i].bullishSweep = true;
-            gLiqLevels[i].sweepTime    = iTime(_Symbol, PERIOD_M15, bar);
-            gSweepDone = true;
-            gSweepBull = true;
-            gSweepTime = gLiqLevels[i].sweepTime;
-            if(tag=="PDL")    gSweptPDL    = true;
-            if(tag=="PDH")    gSweptPDH    = true;
-            if(tag=="PWL")    gSweptPWL    = true;
-            if(tag=="PWH")    gSweptPWH    = true;
-            if(tag=="AsianL") gSweptAsianL = true;
-            if(tag=="AsianH") gSweptAsianH = true;
-            if(tag=="EQL")    gSweptEQL    = true;
-            if(tag=="EQH")    gSweptEQH    = true;
-            if(DrawLiqSweeps) DrawSweepMark(lvl, gLiqLevels[i].sweepTime, true);
-         }
-         // Buy-side sweep: wick above, close back below → bearish setup
-         else if(barHigh > lvl + minWick && barClose < lvl)
-         {
-            gLiqLevels[i].swept        = true;
-            gLiqLevels[i].bullishSweep = false;
-            gLiqLevels[i].sweepTime    = iTime(_Symbol, PERIOD_M15, bar);
-            gSweepDone = true;
-            gSweepBull = false;
-            gSweepTime = gLiqLevels[i].sweepTime;
-            if(tag=="PDH")    gSweptPDH    = true;
-            if(tag=="PDL")    gSweptPDL    = true;
-            if(tag=="PWH")    gSweptPWH    = true;
-            if(tag=="PWL")    gSweptPWL    = true;
-            if(tag=="AsianH") gSweptAsianH = true;
-            if(tag=="AsianL") gSweptAsianL = true;
-            if(tag=="EQH")    gSweptEQH    = true;
-            if(tag=="EQL")    gSweptEQL    = true;
-            if(DrawLiqSweeps) DrawSweepMark(lvl, gLiqLevels[i].sweepTime, false);
-         }
-      }
-   }
-   // gSweepDone persists across bars until stale timer expires or explicit reset
 }
 
 //===================================================================
@@ -1126,23 +1104,14 @@ void RunMSSEngine()
 
 void RunDisplacementEngine()
 {
-   bool aggrMode = AggressiveMode || ScalperMode;
-   if(!gMSS.valid)
-   {
-      // In aggressive mode with AggrMSSOptional: allow displacement check even without MSS
-      if(!(aggrMode && AggrMSSOptional && gSweepDone))
-      { gDisp.valid = false; return; }
-   }
-   if(gDisp.valid) return;   // already confirmed, persist with sweep state
+   gDisp.valid = false;
+   if(!gMSS.valid) return;
 
    double atr = GetATRMain(1);
    if(atr <= 0) return;
 
    ENUM_TIMEFRAMES tf = PERIOD_M15;
-   int lb = aggrMode ? MathMax(DispLookbackBars, 8) : DispLookbackBars;
-
-   double minBody = aggrMode ? AggrDispMinBodyPct  : DispMinBodyPct;
-   double minATR  = aggrMode ? AggrDispMinATRMulti : DispMinATRMulti;
+   int lb = DispLookbackBars;
 
    for(int i = 1; i <= lb; i++)
    {
@@ -1157,8 +1126,8 @@ void RunDisplacementEngine()
       double bodyPct  = body / range;
       double atrRatio = range / atr;
 
-      if(bodyPct  < minBody) continue;
-      if(atrRatio < minATR)  continue;
+      if(bodyPct  < DispMinBodyPct)   continue;
+      if(atrRatio < DispMinATRMulti)  continue;
 
       bool isBullDisp = (c > o) && gSweepBull;
       bool isBearDisp = (c < o) && !gSweepBull;
@@ -1176,14 +1145,6 @@ void RunDisplacementEngine()
          gDisp.valid     = true;
          return;
       }
-   }
-
-   // In aggressive mode with AggrDispOptional: mark valid even without candle
-   if(aggrMode && AggrDispOptional && gSweepDone)
-   {
-      gDisp.bullish  = gSweepBull;
-      gDisp.bearish  = !gSweepBull;
-      gDisp.valid    = true;
    }
 }
 
@@ -1282,15 +1243,11 @@ void ScanFVGs()
 bool PriceInFVG(bool bullish, double& fvgTop, double& fvgBot, double& fvgCE)
 {
    double curC = iClose(_Symbol, PERIOD_M15, 0);
-   int checked = 0, mitigated = 0, wrongDir = 0, outsideZone = 0;
-
    for(int i = 0; i < gFVGCount; i++)
    {
       SFVGZone z = gFVGs[i];
-      if(!z.valid) continue;
-      if(z.mitigated)         { mitigated++;  continue; }
-      if(z.bullish != bullish){ wrongDir++;   continue; }
-      checked++;
+      if(!z.valid || z.mitigated) continue;
+      if(z.bullish != bullish)    continue;
       if(curC >= z.bottom && curC <= z.top)
       {
          fvgTop = z.top;
@@ -1298,12 +1255,7 @@ bool PriceInFVG(bool bullish, double& fvgTop, double& fvgBot, double& fvgCE)
          fvgCE  = z.ce;
          return true;
       }
-      outsideZone++;
    }
-
-   if(DebugLogs && (checked > 0 || mitigated > 0))
-      Print(StringFormat("FVG check [%s]: %d valid, %d mitigated, %d wrong-dir, %d outside zone. Price=%.5f",
-            bullish?"BULL":"BEAR", checked, mitigated, wrongDir, outsideZone, curC));
    return false;
 }
 
@@ -1506,12 +1458,13 @@ ENUM_ATLAS_SESSION GetCurrentSession()
    int h = dt.hour;
    int m = dt.min;
    double hf = h + m / 60.0;
+
    double ex = ExpandKillzones ? 2.0 : 0.0;
 
-   if(SessionAsian   && hf >= AsianStartHour  - ex && hf < AsianEndHour  + ex) return SES_ASIAN;
-   if(SessionLondon  && hf >= LondonStartHour - ex && hf < LondonEndHour + ex) return SES_LONDON;
-   if(SessionNewYork && hf >= NYStartHour     - ex && hf < NYEndHour     + ex) return SES_NEWYORK;
-   if(SessionNYPM    && hf >= NYPMStartHour   - ex && hf < NYPMEndHour   + ex) return SES_NEWYORK;
+   if(SessionAsian  && hf >= AsianStartHour        && hf < AsianEndHour)          return SES_ASIAN;
+   if(SessionLondon && hf >= LondonStartHour - ex  && hf < LondonEndHour + ex)    return SES_LONDON;
+   if(SessionNewYork && hf >= NYStartHour - ex     && hf < NYEndHour + ex)        return SES_NEWYORK;
+   if(SessionNYPM   && hf >= NYPMStartHour         && hf < NYPMEndHour)           return SES_NEWYORK;
    return SES_NONE;
 }
 
@@ -1767,65 +1720,59 @@ void CalcConfluenceScore(bool bullish)
    gScore.total         = 0;
    gScore.failCount     = 0;
 
-   bool aggrMode    = AggressiveMode || ScalperMode;
-   bool sweepPresent = gSweepDone && gSweepBull == bullish;
-   ENUM_ATLAS_BIAS weeklyDir = bullish ? BIAS_BULLISH : BIAS_BEARISH;
-
    // Weekly bias
-   if(!RequireWeeklyBias || gBias.weekly == weeklyDir)
+   if(!RequireWeeklyBias || (bullish ? gBias.weekly == BIAS_BULLISH : gBias.weekly == BIAS_BEARISH))
       gScore.weeklyBias = ScoreWeeklyBias;
    else AddFailReason("Weekly Bias: " + BiasStr(gBias.weekly) +
                       (bullish ? " (need BULLISH)" : " (need BEARISH)"));
 
-   // Daily bias (NEUTRAL+H4+H1 = half credit)
-   bool dailyMatch   = (bullish ? gBias.daily == BIAS_BULLISH : gBias.daily == BIAS_BEARISH);
-   bool dailyNeutral = (gBias.daily == BIAS_NEUTRAL);
-   bool h4Confirm    = (bullish ? gBias.h4 == BIAS_BULLISH : gBias.h4 == BIAS_BEARISH);
-   bool h1Confirm    = (bullish ? gBias.h1 == BIAS_BULLISH : gBias.h1 == BIAS_BEARISH);
+   // Daily bias — with H4+H1 override for NEUTRAL days:
+   //   Full score  : Daily direction matches
+   //   Half score  : Daily is NEUTRAL but H4 + H1 both confirm direction
+   //   Zero + fail : Daily actively opposes direction
+   bool dailyMatch    = bullish ? gBias.daily == BIAS_BULLISH : gBias.daily == BIAS_BEARISH;
+   bool dailyNeutral  = (gBias.daily == BIAS_NEUTRAL);
+   bool h4Confirm     = bullish ? gBias.h4 == BIAS_BULLISH : gBias.h4 == BIAS_BEARISH;
+   bool h1Confirm     = bullish ? gBias.h1 == BIAS_BULLISH : gBias.h1 == BIAS_BEARISH;
+   bool dailyOpposed  = !dailyMatch && !dailyNeutral;
    if(!RequireDailyBias || dailyMatch)
       gScore.dailyBias = ScoreDailyBias;
    else if(dailyNeutral && h4Confirm && h1Confirm)
-      gScore.dailyBias = ScoreDailyBias / 2;
+      gScore.dailyBias = ScoreDailyBias / 2;   // half credit: NEUTRAL + H4+H1 aligned
    else AddFailReason("Daily Bias: " + BiasStr(gBias.daily) +
-                      (bullish ? " (need BULLISH)" : " (need BEARISH)"));
+                      (dailyOpposed ? (bullish?" (OPPOSED-BEARISH)":" (OPPOSED-BULLISH)")
+                                    : (bullish?" (need BULLISH)":" (need BEARISH)")));
 
    // Liquidity sweep
-   // AllowContinuation: give half credit when no sweep but bias is aligned
-   if(!UseLiquidityEngine || sweepPresent)
+   bool aggrModeScore = AggressiveMode || ScalperMode;
+   if(!UseLiquidityEngine || (gSweepDone && gSweepBull == bullish))
       gScore.liqSweep = ScoreLiqSweep;
-   else if(aggrMode && AllowContinuation && gBias.weekly == weeklyDir)
-      gScore.liqSweep = ScoreLiqSweep / 2;   // continuation: half credit
+   else if(aggrModeScore && AllowContinuation &&
+           (bullish ? gBias.weekly == BIAS_BULLISH || gBias.daily == BIAS_BULLISH
+                    : gBias.weekly == BIAS_BEARISH || gBias.daily == BIAS_BEARISH))
+      gScore.liqSweep = ScoreLiqSweep / 2;  // half-credit: bias aligned, no sweep
    else AddFailReason("Liquidity Sweep: Missing");
 
    // MSS
-   bool mssPresent = (gMSS.valid && gMSS.bullish == bullish);
-   if(!UseMSSFilter || mssPresent)
+   if(!UseMSSFilter || (gMSS.valid && gMSS.bullish == bullish))
       gScore.mss = ScoreMSS;
-   else if(aggrMode && AggrMSSOptional && sweepPresent)
-      gScore.mss = ScoreMSS / 2;   // optional in aggressive: half credit
    else AddFailReason("MSS: Not confirmed");
 
    // Displacement
-   bool dispPresent = (gDisp.valid && gDisp.bullish == bullish);
-   if(!UseDispFilter || dispPresent)
+   if(!UseDispFilter || (gDisp.valid && gDisp.bullish == bullish))
       gScore.displacement = ScoreDisplacement;
-   else if(aggrMode && AggrDispOptional)
-      {} // optional — 0 pts, no fail
    else AddFailReason("Displacement: Not confirmed");
 
    // FVG
    double fTop, fBot, fCE;
    bool inFVG = PriceInFVG(bullish, fTop, fBot, fCE);
-   bool fvgRequired = UseFVGFilter && !(aggrMode && !AggrRequireFVG);
-   if(!fvgRequired || inFVG)
+   if(!UseFVGFilter || inFVG)
       gScore.fvg = ScoreFVG;
-   else AddFailReason("FVG: Price not in any FVG");
+   else AddFailReason("FVG: Price not in FVG");
 
-   // Killzone — soft score; hard block handled in ValidateSetup
+   // Killzone
    if(!UseSessionFilter || InKillzone())
       gScore.killzone = ScoreKillzone;
-   else if(aggrMode && !AggrStrictKillzone)
-      {} // outside KZ but not blocking in aggressive — 0 pts, no fail
    else AddFailReason("Killzone: Outside session");
 
    // SMT
@@ -1833,21 +1780,17 @@ void CalcConfluenceScore(bool bullish)
       gScore.smt = ScoreSMT;
 
    // ADR
-   double adrCap = aggrMode ? AggrADRMaxPct : ADRMaxPct;
-   bool adrBlocked = UseADRFilter && (gADR.completionPct >= adrCap);
-   if(!adrBlocked)
+   if(!UseADRFilter || !gADR.blocked)
       gScore.adrScore = ScoreADR;
-   else AddFailReason("ADR: " + DoubleToString(gADR.completionPct * 100, 0) + "% >= " +
-                      DoubleToString(adrCap * 100, 0) + "%");
+   else AddFailReason("ADR: " + DoubleToString(gADR.completionPct * 100, 0) + "% complete");
 
    // Power of 3
    if(!UsePO3Filter || (gPO3.valid && gPO3.bullish == bullish))
       gScore.po3 = ScorePO3;
 
    // Premium/Discount
-   bool pdPass     = bullish ? InDiscount() : InPremium();
-   bool pdRequired = UsePremDiscFilter && !(aggrMode && !AggrStrictPremDisc);
-   if(!pdRequired || pdPass)
+   bool pdPass = bullish ? InDiscount() : InPremium();
+   if(!UsePremDiscFilter || pdPass)
       gScore.premDisc = ScorePremDisc;
    else AddFailReason("P/D: Not in " + (bullish ? "Discount" : "Premium"));
 
@@ -1995,32 +1938,33 @@ bool ValidateSetup(bool bullish)
 {
    bool aggrMode = AggressiveMode || ScalperMode;
 
-   // Killzone hard block — skipped in aggressive mode unless AggrStrictKillzone
-   if(UseSessionFilter && !InKillzone())
+   // Hard block: session/killzone must be active when filter is on
+   // In aggressive mode, only enforce killzone if AggrStrictKillzone is true
+   bool kzRequired = UseSessionFilter && (!aggrMode || AggrStrictKillzone);
+   if(kzRequired && !InKillzone())
    {
-      if(!aggrMode || AggrStrictKillzone)
-      {
-         AddFailReason("Killzone: Outside session");
-         return false;
-      }
+      AddFailReason("Killzone: Outside session");
+      return false;
    }
 
    CalcConfluenceScore(bullish);
    gCurGrade = CalcGrade(gScore.total);
 
-   int minScoreNow = ScalperMode ? ScalperMinScore :
-                     (AggressiveMode ? AggrMinScore : MinScore);
-
+   int minScoreNow = ScalperMode ? ScalperMinScore : (aggrMode ? AggrMinScore : MinScore);
    if(UseScoringSystem && gScore.total < minScoreNow)
    {
       AddFailReason("Score: " + IntegerToString(gScore.total) + " < " + IntegerToString(minScoreNow));
       return false;
    }
 
-   // Grade check skipped in aggressive/scalper mode
    if(!aggrMode && !GradeAllowed(gCurGrade))
    {
       AddFailReason("Grade: " + GradeStr(gCurGrade) + " below minimum");
+      return false;
+   }
+   if(aggrMode && AggrAllowGradeB && gCurGrade > GRADE_B)
+   {
+      AddFailReason("Grade: " + GradeStr(gCurGrade) + " below B (aggressive)");
       return false;
    }
 
@@ -2036,11 +1980,7 @@ bool ValidateSetup(bool bullish)
       return false;
    }
 
-   if(DebugLogs)
-      Print(StringFormat("SETUP VALID [%s] Score=%d/%d Grade=%s Aggr=%s",
-            bullish?"LONG":"SHORT", gScore.total, minScoreNow,
-            GradeStr(gCurGrade), aggrMode?"YES":"NO"));
-
+   // Score threshold is the gate — fail reasons are for panel display only
    return true;
 }
 
@@ -2048,35 +1988,84 @@ bool ValidateSetup(bool bullish)
 // SECTION 22 — [17] TRADE ENTRY ENGINE
 //===================================================================
 
+double CalcLocalSwingSL(bool bullish, int lookback, string &src)
+{
+   double result;
+   if(bullish)
+   {
+      double swLow = iLow(_Symbol, PERIOD_M15, 1);
+      for(int i = 2; i <= lookback; i++)
+         swLow = MathMin(swLow, iLow(_Symbol, PERIOD_M15, i));
+      result = swLow - Pips(SLBufferPips);
+      src = "Local Low (" + IntegerToString(lookback) + "b)";
+   }
+   else
+   {
+      double swHigh = iHigh(_Symbol, PERIOD_M15, 1);
+      for(int i = 2; i <= lookback; i++)
+         swHigh = MathMax(swHigh, iHigh(_Symbol, PERIOD_M15, i));
+      result = swHigh + Pips(SLBufferPips);
+      src = "Local High (" + IntegerToString(lookback) + "b)";
+   }
+   return result;
+}
+
 void PlaceTrade(bool bullish)
 {
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
 
-   // Calculate SL based on recent swing
+   bool aggrMode = AggressiveMode || ScalperMode;
+   double effMaxSL = aggrMode ? AggrMaxSLPips : gEffMaxSL;
+
+   // Calculate SL — local swing in aggressive mode or when UseLocalSwingSL=true
    double slPrice = 0;
-   if(bullish)
+   bool useLocal = UseLocalSwingSL || aggrMode;
+   if(useLocal)
    {
-      // SL below sweep low
-      double sweepLow = gBias.pdl;
-      for(int i = 1; i <= 10; i++)
-         sweepLow = MathMin(sweepLow, iLow(_Symbol, PERIOD_M15, i));
-      slPrice = sweepLow - Pips(SLBufferPips);
+      slPrice = CalcLocalSwingSL(bullish, SwingLookback, gSLSource);
    }
    else
    {
-      double sweepHigh = gBias.pdh;
-      for(int i = 1; i <= 10; i++)
-         sweepHigh = MathMax(sweepHigh, iHigh(_Symbol, PERIOD_M15, i));
-      slPrice = sweepHigh + Pips(SLBufferPips);
+      if(bullish)
+      {
+         double sweepLow = gBias.pdl;
+         for(int i = 1; i <= 10; i++)
+            sweepLow = MathMin(sweepLow, iLow(_Symbol, PERIOD_M15, i));
+         slPrice = sweepLow - Pips(SLBufferPips);
+         gSLSource = "PDL";
+      }
+      else
+      {
+         double sweepHigh = gBias.pdh;
+         for(int i = 1; i <= 10; i++)
+            sweepHigh = MathMax(sweepHigh, iHigh(_Symbol, PERIOD_M15, i));
+         slPrice = sweepHigh + Pips(SLBufferPips);
+         gSLSource = "PDH";
+      }
    }
 
    double entry = bullish ? ask : bid;
    double slPips = ToPips(MathAbs(entry - slPrice));
 
+   // Store for panel display
+   gLastEntryPrice = entry;
+   gLastSLPrice    = slPrice;
+   gLastSLPips     = slPips;
+
    // Validate SL size
-   if(slPips < gEffMinSL) { AddFailReason("SL too small: " + DoubleToString(slPips, 1) + " pips"); return; }
-   if(slPips > gEffMaxSL) { AddFailReason("SL too large: " + DoubleToString(slPips, 1) + " pips"); return; }
+   if(slPips < gEffMinSL)
+   {
+      AddFailReason("SL too small: " + DoubleToString(slPips,1) + "p (min " + IntegerToString((int)gEffMinSL) + ", src=" + gSLSource + ")");
+      gSignalsRejected++;
+      return;
+   }
+   if(slPips > effMaxSL)
+   {
+      AddFailReason("SL too large: " + DoubleToString(slPips,1) + "p (max " + IntegerToString((int)effMaxSL) + ", src=" + gSLSource + ")");
+      gSignalsRejected++;
+      return;
+   }
 
    double rValue = MathAbs(entry - slPrice);
    double tp1    = bullish ? entry + rValue * TP1_RR : entry - rValue * TP1_RR;
@@ -2135,9 +2124,8 @@ void PlaceTrade(bool bullish)
    gMSS.valid = false;
    gDisp.valid = false;
    gSetupReady = false;
-   gSweptPDH=false; gSweptPDL=false; gSweptPWH=false; gSweptPWL=false;
-   gSweptAsianH=false; gSweptAsianL=false; gSweptEQH=false; gSweptEQL=false;
 
+   gSignalsExecuted++;
    Print(StringFormat("ATLAS ENTRY: %s | %s | Lot=%.2f | SL=%.5f | TP1=%.5f | TP2=%.5f | Score=%d | Grade=%s",
          bullish ? "BUY" : "SELL", _Symbol, lot, slPrice, tp1, tp2, gScore.total, GradeStr(gCurGrade)));
 }
@@ -2459,41 +2447,9 @@ void RectSet(string name, int x, int y, int w, int h, color bg, color border)
 string PassFail(bool ok) { return ok ? " PASS" : " FAIL"; }
 color  PFColor(bool ok)  { return ok ? COL_PASS : COL_FAIL; }
 
-void SectionHeader(const string key, const string title, int& row, int x, int lh)
-{
-   string btnName = "ATLASP_BTN_" + key;
-   string hdrName = "ATLASP_SH_"  + key;
-   int y = RowY(row);
-   LabelSet(hdrName, "--- " + title + " ---", x, y, COL_BLUE, 7);
-   if(ObjectFind(0, btnName) < 0)
-   {
-      ObjectCreate(0, btnName, OBJ_BUTTON, 0, 0, 0);
-      ObjectSetInteger(0, btnName, OBJPROP_CORNER,       CORNER_LEFT_UPPER);
-      ObjectSetInteger(0, btnName, OBJPROP_XSIZE,        22);
-      ObjectSetInteger(0, btnName, OBJPROP_YSIZE,        lh - 1);
-      ObjectSetInteger(0, btnName, OBJPROP_FONTSIZE,     7);
-      ObjectSetInteger(0, btnName, OBJPROP_COLOR,        COL_GOLD);
-      ObjectSetInteger(0, btnName, OBJPROP_BGCOLOR,      C'40,44,68');
-      ObjectSetInteger(0, btnName, OBJPROP_BORDER_COLOR, COL_BORDER);
-      ObjectSetInteger(0, btnName, OBJPROP_SELECTABLE,   false);
-   }
-   ObjectSetString (0, btnName, OBJPROP_TEXT,      "");
-   ObjectSetInteger(0, btnName, OBJPROP_XDISTANCE, x + PANEL_W - 36);
-   ObjectSetInteger(0, btnName, OBJPROP_YDISTANCE, y);
-   ObjectSetInteger(0, btnName, OBJPROP_STATE,     false);
-   row++;
-}
-
-void UpdateSecBtn(const string key, bool expanded)
-{
-   string n = "ATLASP_BTN_" + key;
-   if(ObjectFind(0, n) >= 0)
-      ObjectSetString(0, n, OBJPROP_TEXT, expanded ? " - " : " + ");
-}
-
 void UpdatePanel()
 {
-   if(!ShowPanel) { DeletePanel(); return; }
+   if(!ShowPanel) return;
 
    int x  = gPanelX;
    int y  = gPanelY;
@@ -2502,258 +2458,193 @@ void UpdatePanel()
    int row = 0;
    gPanY = y; gPanLH = lh;
 
-   // Rebuild all objects when collapse state changes to clear ghost labels
-   static bool prevCollapsed = false;
-   if(prevCollapsed != gPanelCollapsed)
+   // === BACKGROUND ===
+   int totalH = 58 * lh + 14;
+   RectSet("ATLASP_BG",  x-4, y-4, PANEL_W, totalH, COL_BG, COL_BORDER);
+   RectSet("ATLASP_HDR", x-4, y-4, PANEL_W, lh + 6, COL_HDR, COL_BORDER);
+   LabelSet("ATLASP_T", " ICT ATLAS EA V1.0  |  " + _Symbol, x, RowY(row), COL_GOLD, 9);
+   row = 2;
+
+   // === BIAS ENGINE ===
+   LabelSet("ATLASP_B0",  "--- BIAS ENGINE ----------------------", x, RowY(row++), COL_BLUE, 7);
+   LabelSet("ATLASP_B1L", "Weekly Bias :", x, RowY(row), COL_TXT, 8);
+   LabelSet("ATLASP_B1V", BiasStr(gBias.weekly), vx, RowY(row++),
+            gBias.weekly==BIAS_BULLISH?COL_GREEN:gBias.weekly==BIAS_BEARISH?COL_RED:COL_GOLD, 8);
+   LabelSet("ATLASP_B2L", "Daily Bias  :", x, RowY(row), COL_TXT, 8);
+   LabelSet("ATLASP_B2V", BiasStr(gBias.daily),  vx, RowY(row++),
+            gBias.daily==BIAS_BULLISH?COL_GREEN:gBias.daily==BIAS_BEARISH?COL_RED:COL_GOLD, 8);
+   LabelSet("ATLASP_B3L", "H4 Bias     :", x, RowY(row), COL_TXT, 8);
+   LabelSet("ATLASP_B3V", BiasStr(gBias.h4),     vx, RowY(row++),
+            gBias.h4==BIAS_BULLISH?COL_GREEN:gBias.h4==BIAS_BEARISH?COL_RED:COL_GOLD, 8);
+   LabelSet("ATLASP_B4L", "H1 Bias     :", x, RowY(row), COL_TXT, 8);
+   LabelSet("ATLASP_B4V", BiasStr(gBias.h1),     vx, RowY(row++),
+            gBias.h1==BIAS_BULLISH?COL_GREEN:gBias.h1==BIAS_BEARISH?COL_RED:COL_GOLD, 8);
+   LabelSet("ATLASP_B5L", "PDH / PDL   :", x, RowY(row), COL_TXT, 8);
+   LabelSet("ATLASP_B5V", DoubleToString(gBias.pdh,_Digits)+" / "+DoubleToString(gBias.pdl,_Digits),
+            vx, RowY(row++), COL_GOLD, 8);
+   LabelSet("ATLASP_B6L", "PWH / PWL   :", x, RowY(row), COL_TXT, 8);
+   LabelSet("ATLASP_B6V", DoubleToString(gBias.pwh,_Digits)+" / "+DoubleToString(gBias.pwl,_Digits),
+            vx, RowY(row++), COL_GOLD, 8);
+
+   // === LIQUIDITY ===
+   row++;
+   LabelSet("ATLASP_L0",  "--- LIQUIDITY ------------------------", x, RowY(row++), COL_BLUE, 7);
+   LabelSet("ATLASP_L1L", "Levels Track:", x, RowY(row), COL_TXT, 8);
+   LabelSet("ATLASP_L1V", IntegerToString(gLiqCount)+" levels",   vx, RowY(row++), COL_GOLD, 8);
+   LabelSet("ATLASP_L2L", "Sweep Done  :", x, RowY(row), COL_TXT, 8);
+   LabelSet("ATLASP_L2V", gSweepDone?(gSweepBull?"BULL SWEEP":"BEAR SWEEP"):"NONE",
+            vx, RowY(row++), gSweepDone?COL_GREEN:COL_FAIL, 8);
+
+   // === STRUCTURE ===
+   row++;
+   LabelSet("ATLASP_S0",  "--- MARKET STRUCTURE -----------------", x, RowY(row++), COL_BLUE, 7);
+   LabelSet("ATLASP_S1L", "MSS         :", x, RowY(row), COL_TXT, 8);
+   LabelSet("ATLASP_S1V", gMSS.valid?(gMSS.bullish?"BULLISH MSS":"BEARISH MSS"):"NONE",
+            vx, RowY(row++), gMSS.valid?COL_GREEN:COL_FAIL, 8);
+   LabelSet("ATLASP_S2L", "Displacement:", x, RowY(row), COL_TXT, 8);
+   LabelSet("ATLASP_S2V", gDisp.valid?(gDisp.bullish?"BULL DISP":"BEAR DISP"):"NONE",
+            vx, RowY(row++), gDisp.valid?COL_GREEN:COL_FAIL, 8);
+
+   // === FVG + PD ARRAY ===
+   row++;
+   LabelSet("ATLASP_F0",  "--- FVG & PD ARRAY -------------------", x, RowY(row++), COL_BLUE, 7);
+   int validFVG = 0, mitFVG = 0;
+   for(int i = 0; i < gFVGCount; i++)
    {
-      DeletePanel();
-      prevCollapsed = gPanelCollapsed;
+      if(gFVGs[i].valid && !gFVGs[i].mitigated) validFVG++;
+      else if(gFVGs[i].mitigated)               mitFVG++;
    }
+   LabelSet("ATLASP_F1L", "FVGs Active :", x, RowY(row), COL_TXT, 8);
+   LabelSet("ATLASP_F1V", IntegerToString(validFVG)+" active / "+IntegerToString(mitFVG)+" mitigated",
+            vx, RowY(row++), validFVG>0?COL_GREEN:COL_TXT, 8);
+   int validOB = 0;
+   for(int i = 0; i < gPDACount; i++) if(gPDAs[i].valid && !gPDAs[i].mitigated) validOB++;
+   LabelSet("ATLASP_F2L", "OBs Active  :", x, RowY(row), COL_TXT, 8);
+   LabelSet("ATLASP_F2V", IntegerToString(validOB)+" active",  vx, RowY(row++), validOB>0?COL_GREEN:COL_TXT, 8);
 
-   // === HEADER (always visible) ===
-   // ATLASP_BG created first so it sits behind all labels (z-order).
-   // Height set to 0 here — no visual until ChartRedraw at the end.
-   int hdrH = lh + 16;   // taller header bar — easier to click when collapsed
-   RectSet("ATLASP_BG",  x-4, y-4, PANEL_W, 0,    COL_BG,  COL_BORDER);
-   RectSet("ATLASP_HDR", x-4, y-4, PANEL_W, hdrH, COL_HDR, COL_BORDER);
-   LabelSet("ATLASP_T",   " ICT ATLAS EA V1.0", x,             y+4, COL_GOLD, 11);
-   LabelSet("ATLASP_BTN", gPanelCollapsed ? " [+]" : " [-]", x+PANEL_W-36, y+4, COL_GOLD, 11);
-   row = 3;   // leave room for the taller header
-
-   if(gPanelCollapsed)
+   // === SESSION & FILTERS ===
+   row++;
+   LabelSet("ATLASP_SE0", "--- SESSION & FILTERS ----------------", x, RowY(row++), COL_BLUE, 7);
+   ENUM_ATLAS_SESSION ses = GetCurrentSession();
+   string sesStr = ses==SES_ASIAN?"ASIAN KZ":ses==SES_LONDON?"LONDON KZ":ses==SES_NEWYORK?"NY KZ":"NO SESSION";
+   LabelSet("ATLASP_SE1L","Session     :", x, RowY(row), COL_TXT, 8);
+   LabelSet("ATLASP_SE1V", sesStr, vx, RowY(row++), ses!=SES_NONE?COL_GREEN:COL_FAIL, 8);
+   LabelSet("ATLASP_SE2L","ADR         :", x, RowY(row), COL_TXT, 8);
+   LabelSet("ATLASP_SE2V", DoubleToString(gADR.completionPct*100,0)+"% ("+DoubleToString(gADR.adrPips,0)+"p)",
+            vx, RowY(row++), gADR.blocked?COL_RED:COL_GREEN, 8);
+   LabelSet("ATLASP_SE3L","News        :", x, RowY(row), COL_TXT, 8);
+   bool newsBlk = IsNewsBlocked();
+   LabelSet("ATLASP_SE3V", newsBlk?"BLOCKED":"CLEAR", vx, RowY(row++), newsBlk?COL_RED:COL_GREEN, 8);
+   LabelSet("ATLASP_SE4L","Market Cond :", x, RowY(row), COL_TXT, 8);
+   LabelSet("ATLASP_SE4V", EnumToString(gCond.condition)+" (ADX="+DoubleToString(gCond.adxValue,1)+")",
+            vx, RowY(row++), ConditionAllowsTrade()?COL_GREEN:COL_RED, 8);
+   LabelSet("ATLASP_SE5L","P/D Zone    :", x, RowY(row), COL_TXT, 8);
+   double pdpct = GetPremDiscPct() * 100.0;
+   string pdLabel;
+   if(pdpct > 100)      pdLabel = DoubleToString(pdpct,0)+"% EXTREME PREMIUM";
+   else if(pdpct < 0)   pdLabel = DoubleToString(pdpct,0)+"% EXTREME DISCOUNT";
+   else if(pdpct >= 50) pdLabel = DoubleToString(pdpct,0)+"% PREMIUM";
+   else                 pdLabel = DoubleToString(pdpct,0)+"% DISCOUNT";
+   color pdColor = (pdpct > 100 || pdpct < 0) ? COL_RED : COL_GOLD;
+   LabelSet("ATLASP_SE5V", pdLabel, vx, RowY(row++), pdColor, 8);
+   if(UseSMTFilter)
    {
-      ObjectSetInteger(0, "ATLASP_BG", OBJPROP_YSIZE, hdrH);
-      ChartRedraw(0);
-      return;
+      LabelSet("ATLASP_SM1L","SMT Diverg  :", x, RowY(row), COL_TXT, 8);
+      LabelSet("ATLASP_SM1V", gSMT.valid?(gSMT.bullishDivergence?"BULL SMT":"BEAR SMT"):"NONE",
+               vx, RowY(row++), gSMT.valid?COL_GREEN:COL_TXT, 8);
+   }
+   if(UsePO3Filter)
+   {
+      LabelSet("ATLASP_PO1L","PO3 (AMD)   :", x, RowY(row), COL_TXT, 8);
+      LabelSet("ATLASP_PO1V", gPO3.valid?(gPO3.bullish?"BULL AMD":"BEAR AMD"):(gPO3.manipDone?"MANIP":"ACCUM"),
+               vx, RowY(row++), gPO3.valid?COL_GREEN:COL_GOLD, 8);
    }
 
-   const int HR = 1000;   // off-screen row (RowY(1000) ≈ 14 000 px)
+   // === CONFLUENCE SCORE ===
+   row++;
+   LabelSet("ATLASP_SC0", "--- CONFLUENCE SCORE -----------------", x, RowY(row++), COL_BLUE, 7);
+   int maxScore = ScoreWeeklyBias+ScoreDailyBias+ScoreLiqSweep+ScoreMSS+
+                  ScoreDisplacement+ScoreFVG+ScoreKillzone+ScoreSMT+ScoreADR+ScorePO3+ScorePremDisc;
+   color sclr = gScore.total>=GradeAPlus?COL_GREEN:gScore.total>=GradeA?C'180,220,80':gScore.total>=GradeB?COL_GOLD:COL_RED;
+   LabelSet("ATLASP_SC1L","Score       :", x, RowY(row), COL_TXT, 9);
+   LabelSet("ATLASP_SC1V", IntegerToString(gScore.total)+" / "+IntegerToString(maxScore),
+            vx, RowY(row++), sclr, 9);
+   color gclr = gCurGrade==GRADE_APLUS?COL_GREEN:gCurGrade==GRADE_A?C'180,220,80':gCurGrade==GRADE_B?COL_GOLD:COL_RED;
+   LabelSet("ATLASP_SC2L","Grade       :", x, RowY(row), COL_TXT, 9);
+   LabelSet("ATLASP_SC2V", GradeStr(gCurGrade), vx, RowY(row++), gclr, 9);
 
-   // Creator credit + current symbol (below header, always first content rows)
-   LabelSet("ATLASP_CR1", "  Created by: RATTANA CHHORM",
-            x, RowY(row++), C'220,220,220', 9);
-   LabelSet("ATLASP_CR2", "  Symbol: " + _Symbol + "  |  " + EnumToString(_Period),
-            x, RowY(row++), C'180,180,180', 8);
+   // === FINAL DECISION ===
+   row++;
+   LabelSet("ATLASP_D0", "--- FINAL DECISION -------------------", x, RowY(row++), COL_BLUE, 7);
+   color dclr = gSetupReady ? COL_GREEN : COL_RED;
+   LabelSet("ATLASP_D1", gSetupReady ? "  TRADE READY: "+(gSetupBull?"LONG":"SHORT") : "  NO TRADE",
+            x, RowY(row++), dclr, 9);
+   for(int i = 0; i < MathMin(gScore.failCount, 6); i++)
+      LabelSet("ATLASP_DR"+IntegerToString(i), "  >> "+gScore.failReasons[i], x, RowY(row++), COL_RED, 7);
+   if(gSetupReady)
+      LabelSet("ATLASP_DM", "  Model: "+gTrade.model, x, RowY(row++), COL_GOLD, 7);
 
-   // BIAS ENGINE
-   SectionHeader("BIAS", "BIAS ENGINE", row, x, lh);
-   UpdateSecBtn("BIAS", gSecBias);
-   { int r = gSecBias ? row : HR;
-     LabelSet("ATLASP_B1L", "Weekly Bias :", x, RowY(r), COL_TXT, 8);
-     LabelSet("ATLASP_B1V", BiasStr(gBias.weekly), vx, RowY(r++),
-              gBias.weekly==BIAS_BULLISH?COL_GREEN:gBias.weekly==BIAS_BEARISH?COL_RED:COL_GOLD, 8);
-     LabelSet("ATLASP_B2L", "Daily Bias  :", x, RowY(r), COL_TXT, 8);
-     LabelSet("ATLASP_B2V", BiasStr(gBias.daily), vx, RowY(r++),
-              gBias.daily==BIAS_BULLISH?COL_GREEN:gBias.daily==BIAS_BEARISH?COL_RED:COL_GOLD, 8);
-     LabelSet("ATLASP_B3L", "H4 Bias     :", x, RowY(r), COL_TXT, 8);
-     LabelSet("ATLASP_B3V", BiasStr(gBias.h4), vx, RowY(r++),
-              gBias.h4==BIAS_BULLISH?COL_GREEN:gBias.h4==BIAS_BEARISH?COL_RED:COL_GOLD, 8);
-     LabelSet("ATLASP_B4L", "H1 Bias     :", x, RowY(r), COL_TXT, 8);
-     LabelSet("ATLASP_B4V", BiasStr(gBias.h1), vx, RowY(r++),
-              gBias.h1==BIAS_BULLISH?COL_GREEN:gBias.h1==BIAS_BEARISH?COL_RED:COL_GOLD, 8);
-     LabelSet("ATLASP_B5L", "PDH / PDL   :", x, RowY(r), COL_TXT, 8);
-     LabelSet("ATLASP_B5V", DoubleToString(gBias.pdh,_Digits)+" / "+DoubleToString(gBias.pdl,_Digits),
-              vx, RowY(r++), COL_GOLD, 8);
-     LabelSet("ATLASP_B6L", "PWH / PWL   :", x, RowY(r), COL_TXT, 8);
-     LabelSet("ATLASP_B6V", DoubleToString(gBias.pwh,_Digits)+" / "+DoubleToString(gBias.pwl,_Digits),
-              vx, RowY(r++), COL_GOLD, 8);
-     if(gSecBias) row = r;
+   // Show SL diagnostics when available
+   if(gLastSLPips > 0)
+   {
+      LabelSet("ATLASP_SLSRC",  "  SL Src: " + gSLSource,                      x, RowY(row++), COL_GOLD, 7);
+      LabelSet("ATLASP_SLPIPS", "  SL: " + DoubleToString(gLastSLPips,1) + " pips",
+               x, RowY(row++), gLastSLPips > gEffMaxSL ? COL_RED : COL_GREEN, 7);
    }
 
-   // LIQUIDITY SWEEP
-   SectionHeader("SWEEP", "LIQUIDITY SWEEP", row, x, lh);
-   UpdateSecBtn("SWEEP", gSecSweep);
-   { int r = gSecSweep ? row : HR;
-     LabelSet("ATLASP_L1L", "Levels Track:", x, RowY(r), COL_TXT, 8);
-     LabelSet("ATLASP_L1V", IntegerToString(gLiqCount)+" levels", vx, RowY(r++), COL_GOLD, 8);
-     LabelSet("ATLASP_L2L", "Sweep Done  :", x, RowY(r), COL_TXT, 8);
-     LabelSet("ATLASP_L2V", gSweepDone?(gSweepBull?"BULL SWEEP":"BEAR SWEEP"):"NONE",
-              vx, RowY(r++), gSweepDone?COL_GREEN:COL_FAIL, 8);
-     // Per-type sweep diagnostics
-     LabelSet("ATLASP_SW_PDH",  "  PDH sweep :", x, RowY(r), COL_TXT, 7);
-     LabelSet("ATLASP_SW_PDHV", gSweptPDH ? "HIT" : "-", vx, RowY(r++), gSweptPDH?COL_GREEN:COL_TXT, 7);
-     LabelSet("ATLASP_SW_PDL",  "  PDL sweep :", x, RowY(r), COL_TXT, 7);
-     LabelSet("ATLASP_SW_PDLV", gSweptPDL ? "HIT" : "-", vx, RowY(r++), gSweptPDL?COL_GREEN:COL_TXT, 7);
-     LabelSet("ATLASP_SW_PWH",  "  PWH sweep :", x, RowY(r), COL_TXT, 7);
-     LabelSet("ATLASP_SW_PWHV", gSweptPWH ? "HIT" : "-", vx, RowY(r++), gSweptPWH?COL_GREEN:COL_TXT, 7);
-     LabelSet("ATLASP_SW_PWL",  "  PWL sweep :", x, RowY(r), COL_TXT, 7);
-     LabelSet("ATLASP_SW_PWLV", gSweptPWL ? "HIT" : "-", vx, RowY(r++), gSweptPWL?COL_GREEN:COL_TXT, 7);
-     LabelSet("ATLASP_SW_ASH",  "  Asian H   :", x, RowY(r), COL_TXT, 7);
-     LabelSet("ATLASP_SW_ASHV", gSweptAsianH ? "HIT" : "-", vx, RowY(r++), gSweptAsianH?COL_GREEN:COL_TXT, 7);
-     LabelSet("ATLASP_SW_ASL",  "  Asian L   :", x, RowY(r), COL_TXT, 7);
-     LabelSet("ATLASP_SW_ASLV", gSweptAsianL ? "HIT" : "-", vx, RowY(r++), gSweptAsianL?COL_GREEN:COL_TXT, 7);
-     LabelSet("ATLASP_SW_EQH",  "  EQH sweep :", x, RowY(r), COL_TXT, 7);
-     LabelSet("ATLASP_SW_EQHV", gSweptEQH ? "HIT" : "-", vx, RowY(r++), gSweptEQH?COL_GREEN:COL_TXT, 7);
-     LabelSet("ATLASP_SW_EQL",  "  EQL sweep :", x, RowY(r), COL_TXT, 7);
-     LabelSet("ATLASP_SW_EQLV", gSweptEQL ? "HIT" : "-", vx, RowY(r++), gSweptEQL?COL_GREEN:COL_TXT, 7);
-     if(gSecSweep) row = r;
-   }
+   // === RISK STATE ===
+   row++;
+   LabelSet("ATLASP_R0",  "--- RISK STATE -----------------------", x, RowY(row++), COL_BLUE, 7);
+   LabelSet("ATLASP_R1L", "Daily P&L   :", x, RowY(row), COL_TXT, 8);
+   LabelSet("ATLASP_R1V", "$"+DoubleToString(gRisk.dailyPnL,2)+" ("+DoubleToString(gRisk.dailyR,2)+"R)",
+            vx, RowY(row++), gRisk.dailyPnL>=0?COL_GREEN:COL_RED, 8);
+   LabelSet("ATLASP_R2L", "Trades Today:", x, RowY(row), COL_TXT, 8);
+   LabelSet("ATLASP_R2V", IntegerToString(gRisk.dailyTrades)+"/"+IntegerToString(MaxTradesPerDay),
+            vx, RowY(row++), COL_GOLD, 8);
+   LabelSet("ATLASP_R3L", "Trading     :", x, RowY(row), COL_TXT, 8);
+   LabelSet("ATLASP_R3V", gRisk.tradingAllowed?"ALLOWED":"STOPPED: "+gRisk.stopReason,
+            vx, RowY(row++), gRisk.tradingAllowed?COL_GREEN:COL_RED, 8);
+   LabelSet("ATLASP_R4L", "Risk/Trade  :", x, RowY(row), COL_TXT, 8);
+   LabelSet("ATLASP_R4V", DoubleToString(gRisk.effectiveRiskPct,2)+"%"+(gRisk.riskReduced?" (REDUCED)":""),
+            vx, RowY(row++), gRisk.riskReduced?COL_GOLD:COL_TXT, 8);
 
-   // ICT CHAIN STATE
-   SectionHeader("CHAIN", "ICT CHAIN STATE", row, x, lh);
-   UpdateSecBtn("CHAIN", gSecChain);
-   { int r = gSecChain ? row : HR;
-     LabelSet("ATLASP_S1L", "MSS         :", x, RowY(r), COL_TXT, 8);
-     LabelSet("ATLASP_S1V", gMSS.valid?(gMSS.bullish?"BULLISH MSS":"BEARISH MSS"):"NONE",
-              vx, RowY(r++), gMSS.valid?COL_GREEN:COL_FAIL, 8);
-     LabelSet("ATLASP_S2L", "Displacement:", x, RowY(r), COL_TXT, 8);
-     LabelSet("ATLASP_S2V", gDisp.valid?(gDisp.bullish?"BULL DISP":"BEAR DISP"):"NONE",
-              vx, RowY(r++), gDisp.valid?COL_GREEN:COL_FAIL, 8);
-     if(gSecChain) row = r;
-   }
-
-   // FVG & PD ARRAY
-   SectionHeader("FVG", "FVG & PD ARRAY", row, x, lh);
-   UpdateSecBtn("FVG", gSecFVG);
-   { int r = gSecFVG ? row : HR;
-     int validFVG = 0, mitFVG = 0;
-     for(int i = 0; i < gFVGCount; i++)
-     {
-        if(gFVGs[i].valid && !gFVGs[i].mitigated) validFVG++;
-        else if(gFVGs[i].mitigated)               mitFVG++;
-     }
-     LabelSet("ATLASP_F1L", "FVGs Active :", x, RowY(r), COL_TXT, 8);
-     LabelSet("ATLASP_F1V", IntegerToString(validFVG)+" active / "+IntegerToString(mitFVG)+" mitigated",
-              vx, RowY(r++), validFVG>0?COL_GREEN:COL_TXT, 8);
-     int validOB = 0;
-     for(int j = 0; j < gPDACount; j++) if(gPDAs[j].valid && !gPDAs[j].mitigated) validOB++;
-     LabelSet("ATLASP_F2L", "OBs Active  :", x, RowY(r), COL_TXT, 8);
-     LabelSet("ATLASP_F2V", IntegerToString(validOB)+" active", vx, RowY(r++), validOB>0?COL_GREEN:COL_TXT, 8);
-     if(gSecFVG) row = r;
-   }
-
-   // FILTER STATUS
-   SectionHeader("FILTER", "FILTER STATUS", row, x, lh);
-   UpdateSecBtn("FILTER", gSecFilter);
-   { int r = gSecFilter ? row : HR;
-     ENUM_ATLAS_SESSION ses = GetCurrentSession();
-     string sesStr = ses==SES_ASIAN?"ASIAN KZ":ses==SES_LONDON?"LONDON KZ":ses==SES_NEWYORK?"NY KZ":"NO SESSION";
-     LabelSet("ATLASP_SE1L","Session     :", x, RowY(r), COL_TXT, 8);
-     LabelSet("ATLASP_SE1V", sesStr, vx, RowY(r++), ses!=SES_NONE?COL_GREEN:COL_FAIL, 8);
-     LabelSet("ATLASP_SE2L","ADR         :", x, RowY(r), COL_TXT, 8);
-     LabelSet("ATLASP_SE2V", DoubleToString(gADR.completionPct*100,0)+"% ("+DoubleToString(gADR.adrPips,0)+"p)",
-              vx, RowY(r++), gADR.blocked?COL_RED:COL_GREEN, 8);
-     LabelSet("ATLASP_SE3L","News        :", x, RowY(r), COL_TXT, 8);
-     bool newsBlk = IsNewsBlocked();
-     LabelSet("ATLASP_SE3V", newsBlk?"BLOCKED":"CLEAR", vx, RowY(r++), newsBlk?COL_RED:COL_GREEN, 8);
-     LabelSet("ATLASP_SE4L","Market Cond :", x, RowY(r), COL_TXT, 8);
-     LabelSet("ATLASP_SE4V", EnumToString(gCond.condition)+" (ADX="+DoubleToString(gCond.adxValue,1)+")",
-              vx, RowY(r++), ConditionAllowsTrade()?COL_GREEN:COL_RED, 8);
-     if(gSecFilter) row = r;
-   }
-
-   // SESSION & P/D
-   SectionHeader("SESSION", "SESSION & P/D", row, x, lh);
-   UpdateSecBtn("SESSION", gSecSession);
-   { int r = gSecSession ? row : HR;
-     double pdpct = GetPremDiscPct() * 100.0;
-     string pdLabel;
-     if(pdpct > 100)      pdLabel = DoubleToString(pdpct,0)+"% EXTREME PREMIUM";
-     else if(pdpct < 0)   pdLabel = DoubleToString(pdpct,0)+"% EXTREME DISCOUNT";
-     else if(pdpct >= 50) pdLabel = DoubleToString(pdpct,0)+"% PREMIUM";
-     else                 pdLabel = DoubleToString(pdpct,0)+"% DISCOUNT";
-     color pdColor = (pdpct > 100 || pdpct < 0) ? COL_RED : COL_GOLD;
-     LabelSet("ATLASP_SE5L","P/D Zone    :", x, RowY(r), COL_TXT, 8);
-     LabelSet("ATLASP_SE5V", pdLabel, vx, RowY(r++), pdColor, 8);
-     if(UseSMTFilter)
-     {
-        LabelSet("ATLASP_SM1L","SMT Diverg  :", x, RowY(r), COL_TXT, 8);
-        LabelSet("ATLASP_SM1V", gSMT.valid?(gSMT.bullishDivergence?"BULL SMT":"BEAR SMT"):"NONE",
-                 vx, RowY(r++), gSMT.valid?COL_GREEN:COL_TXT, 8);
-     }
-     if(UsePO3Filter)
-     {
-        LabelSet("ATLASP_PO1L","PO3 (AMD)   :", x, RowY(r), COL_TXT, 8);
-        LabelSet("ATLASP_PO1V", gPO3.valid?(gPO3.bullish?"BULL AMD":"BEAR AMD"):(gPO3.manipDone?"MANIP":"ACCUM"),
-                 vx, RowY(r++), gPO3.valid?COL_GREEN:COL_GOLD, 8);
-     }
-     if(gSecSession) row = r;
-   }
-
-   // CONFLUENCE SCORE
-   SectionHeader("SCORE", "CONFLUENCE SCORE", row, x, lh);
-   UpdateSecBtn("SCORE", gSecScore);
-   { int r = gSecScore ? row : HR;
-     int maxScore = ScoreWeeklyBias+ScoreDailyBias+ScoreLiqSweep+ScoreMSS+
-                    ScoreDisplacement+ScoreFVG+ScoreKillzone+ScoreSMT+ScoreADR+ScorePO3+ScorePremDisc;
-     color sclr = gScore.total>=GradeAPlus?COL_GREEN:gScore.total>=GradeA?C'180,220,80':gScore.total>=GradeB?COL_GOLD:COL_RED;
-     LabelSet("ATLASP_SC1L","Score       :", x, RowY(r), COL_TXT, 9);
-     LabelSet("ATLASP_SC1V", IntegerToString(gScore.total)+" / "+IntegerToString(maxScore),
-              vx, RowY(r++), sclr, 9);
-     color gclr = gCurGrade==GRADE_APLUS?COL_GREEN:gCurGrade==GRADE_A?C'180,220,80':gCurGrade==GRADE_B?COL_GOLD:COL_RED;
-     LabelSet("ATLASP_SC2L","Grade       :", x, RowY(r), COL_TXT, 9);
-     LabelSet("ATLASP_SC2V", GradeStr(gCurGrade), vx, RowY(r++), gclr, 9);
-     if(gSecScore) row = r;
-   }
-
-   // FINAL DECISION
-   SectionHeader("DECISION", "FINAL DECISION", row, x, lh);
-   UpdateSecBtn("DECISION", gSecDecision);
-   { int r = gSecDecision ? row : HR;
-     color dclr = gSetupReady ? COL_GREEN : COL_RED;
-     LabelSet("ATLASP_D1", gSetupReady ? "  TRADE READY: "+(gSetupBull?"LONG":"SHORT") : "  NO TRADE",
-              x, RowY(r++), dclr, 9);
-     for(int i = 0; i < MathMin(gScore.failCount, 6); i++)
-        LabelSet("ATLASP_DR"+IntegerToString(i), "  >> "+gScore.failReasons[i], x, RowY(r++), COL_RED, 7);
-     if(gSetupReady)
-        LabelSet("ATLASP_DM", "  Model: "+gTrade.model, x, RowY(r++), COL_GOLD, 7);
-     if(gSecDecision) row = r;
-   }
-
-   // RISK STATE
-   SectionHeader("RISK", "RISK STATE", row, x, lh);
-   UpdateSecBtn("RISK", gSecRisk);
-   { int r = gSecRisk ? row : HR;
-     LabelSet("ATLASP_R1L", "Daily P&L   :", x, RowY(r), COL_TXT, 8);
-     LabelSet("ATLASP_R1V", "$"+DoubleToString(gRisk.dailyPnL,2)+" ("+DoubleToString(gRisk.dailyR,2)+"R)",
-              vx, RowY(r++), gRisk.dailyPnL>=0?COL_GREEN:COL_RED, 8);
-     LabelSet("ATLASP_R2L", "Trades Today:", x, RowY(r), COL_TXT, 8);
-     LabelSet("ATLASP_R2V", IntegerToString(gRisk.dailyTrades)+"/"+IntegerToString(MaxTradesPerDay),
-              vx, RowY(r++), COL_GOLD, 8);
-     LabelSet("ATLASP_R3L", "Trading     :", x, RowY(r), COL_TXT, 8);
-     LabelSet("ATLASP_R3V", gRisk.tradingAllowed?"ALLOWED":"STOPPED: "+gRisk.stopReason,
-              vx, RowY(r++), gRisk.tradingAllowed?COL_GREEN:COL_RED, 8);
-     LabelSet("ATLASP_R4L", "Risk/Trade  :", x, RowY(r), COL_TXT, 8);
-     LabelSet("ATLASP_R4V", DoubleToString(gRisk.effectiveRiskPct,2)+"%"+(gRisk.riskReduced?" (REDUCED)":""),
-              vx, RowY(r++), gRisk.riskReduced?COL_GOLD:COL_TXT, 8);
-     if(gSecRisk) row = r;
-   }
-
-   // STATISTICS
+   // === STATISTICS ===
    if(ShowStatPanel)
    {
-      SectionHeader("STATS", "STATISTICS", row, x, lh);
-      UpdateSecBtn("STATS", gSecStats);
-      { int r = gSecStats ? row : HR;
-        double wr = GetWinRate();
-        LabelSet("ATLASP_ST1L","Trades      :", x, RowY(r), COL_TXT, 8);
-        LabelSet("ATLASP_ST1V", IntegerToString(gStats.total)+" (W:"+IntegerToString(gStats.wins)+" L:"+IntegerToString(gStats.losses)+")",
-                 vx, RowY(r++), COL_TXT, 8);
-        LabelSet("ATLASP_ST2L","Win Rate    :", x, RowY(r), COL_TXT, 8);
-        LabelSet("ATLASP_ST2V", DoubleToString(wr,1)+"%",
-                 vx, RowY(r++), wr>=60?COL_GREEN:wr>=50?COL_GOLD:COL_RED, 8);
-        double pf2 = GetProfitFactor();
-        LabelSet("ATLASP_ST3L","Profit Factor:", x, RowY(r), COL_TXT, 8);
-        LabelSet("ATLASP_ST3V", DoubleToString(pf2,2),
-                 vx, RowY(r++), pf2>=1.8?COL_GREEN:pf2>=1.0?COL_GOLD:COL_RED, 8);
-        LabelSet("ATLASP_ST4L","Avg RR      :", x, RowY(r), COL_TXT, 8);
-        LabelSet("ATLASP_ST4V", DoubleToString(GetAvgRR(),2)+"R", vx, RowY(r++), COL_GOLD, 8);
-        if(gStats.pdlModelTotal > 0 || gStats.pdhModelTotal > 0)
-        {
-           double pdlWR = gStats.pdlModelTotal>0?100.0*gStats.pdlModelWins/gStats.pdlModelTotal:0;
-           LabelSet("ATLASP_ST5L","PDL Model   :", x, RowY(r), COL_TXT, 8);
-           LabelSet("ATLASP_ST5V", IntegerToString(gStats.pdlModelTotal)+"t / "+DoubleToString(pdlWR,0)+"%WR",
-                    vx, RowY(r++), COL_GOLD, 8);
-           double pdhWR = gStats.pdhModelTotal>0?100.0*gStats.pdhModelWins/gStats.pdhModelTotal:0;
-           LabelSet("ATLASP_ST6L","PDH Model   :", x, RowY(r), COL_TXT, 8);
-           LabelSet("ATLASP_ST6V", IntegerToString(gStats.pdhModelTotal)+"t / "+DoubleToString(pdhWR,0)+"%WR",
-                    vx, RowY(r++), COL_GOLD, 8);
-        }
-        if(gSecStats) row = r;
+      row++;
+      LabelSet("ATLASP_ST0", "--- STATISTICS -----------------------", x, RowY(row++), COL_BLUE, 7);
+      double wr = GetWinRate();
+      LabelSet("ATLASP_ST1L","Trades      :", x, RowY(row), COL_TXT, 8);
+      LabelSet("ATLASP_ST1V", IntegerToString(gStats.total)+" (W:"+IntegerToString(gStats.wins)+" L:"+IntegerToString(gStats.losses)+")",
+               vx, RowY(row++), COL_TXT, 8);
+      LabelSet("ATLASP_ST2L","Win Rate    :", x, RowY(row), COL_TXT, 8);
+      LabelSet("ATLASP_ST2V", DoubleToString(wr,1)+"%",
+               vx, RowY(row++), wr>=60?COL_GREEN:wr>=50?COL_GOLD:COL_RED, 8);
+      double pf2 = GetProfitFactor();
+      LabelSet("ATLASP_ST3L","Profit Factor:", x, RowY(row), COL_TXT, 8);
+      LabelSet("ATLASP_ST3V", DoubleToString(pf2,2),
+               vx, RowY(row++), pf2>=1.8?COL_GREEN:pf2>=1.0?COL_GOLD:COL_RED, 8);
+      LabelSet("ATLASP_ST4L","Avg RR      :", x, RowY(row), COL_TXT, 8);
+      LabelSet("ATLASP_ST4V", DoubleToString(GetAvgRR(),2)+"R", vx, RowY(row++), COL_GOLD, 8);
+      LabelSet("ATLASP_SIG0", "Signals Fnd :", x, RowY(row), COL_TXT, 8);
+      LabelSet("ATLASP_SIG0V", IntegerToString(gSignalsFound), vx, RowY(row++), COL_GOLD, 8);
+      LabelSet("ATLASP_SIG1", "Rejected    :", x, RowY(row), COL_TXT, 8);
+      LabelSet("ATLASP_SIG1V", IntegerToString(gSignalsRejected), vx, RowY(row++), COL_RED, 8);
+      LabelSet("ATLASP_SIG2", "Executed    :", x, RowY(row), COL_TXT, 8);
+      LabelSet("ATLASP_SIG2V", IntegerToString(gSignalsExecuted), vx, RowY(row++), COL_GREEN, 8);
+      if(gStats.pdlModelTotal > 0 || gStats.pdhModelTotal > 0)
+      {
+         double pdlWR = gStats.pdlModelTotal>0?100.0*gStats.pdlModelWins/gStats.pdlModelTotal:0;
+         LabelSet("ATLASP_ST5L","PDL Model   :", x, RowY(row), COL_TXT, 8);
+         LabelSet("ATLASP_ST5V", IntegerToString(gStats.pdlModelTotal)+"t / "+DoubleToString(pdlWR,0)+"%WR",
+                  vx, RowY(row++), COL_GOLD, 8);
+         double pdhWR = gStats.pdhModelTotal>0?100.0*gStats.pdhModelWins/gStats.pdhModelTotal:0;
+         LabelSet("ATLASP_ST6L","PDH Model   :", x, RowY(row), COL_TXT, 8);
+         LabelSet("ATLASP_ST6V", IntegerToString(gStats.pdhModelTotal)+"t / "+DoubleToString(pdhWR,0)+"%WR",
+                  vx, RowY(row++), COL_GOLD, 8);
       }
    }
 
-   // Set BG to exact content height — atomically with ChartRedraw so no flash
    ObjectSetInteger(0, "ATLASP_BG", OBJPROP_YSIZE, row * lh + 14);
    ChartRedraw(0);
 }
@@ -2847,6 +2738,8 @@ void CheckForEntry()
    SScoreCard primaryScore = gScore;           // snapshot for panel display
    ENUM_ATLAS_GRADE primaryGrade = CalcGrade(gScore.total);
 
+   if(okPrimary) gSignalsFound++;
+
    if(okPrimary)
    {
       gSetupReady = true;
@@ -2859,6 +2752,8 @@ void CheckForEntry()
    // Try opposite direction (counter-trend only when primary fails)
    gScore.failCount = 0;
    bool okSecond = ValidateSetup(!preferBull);
+
+   if(okSecond) gSignalsFound++;
 
    if(okSecond)
    {
@@ -2946,8 +2841,6 @@ void OnTick()
       gSweepDone = false;
       gMSS.valid = false;
       gDisp.valid = false;
-      gSweptPDH=false; gSweptPDL=false; gSweptPWH=false; gSweptPWL=false;
-      gSweptAsianH=false; gSweptAsianL=false; gSweptEQH=false; gSweptEQL=false;
    }
 
    // Check new W1 bar
@@ -2961,8 +2854,6 @@ void OnTick()
       gSweepDone = false;
       gMSS.valid = false;
       gDisp.valid = false;
-      gSweptPDH=false; gSweptPDL=false; gSweptPWH=false; gSweptPWL=false;
-      gSweptAsianH=false; gSweptAsianL=false; gSweptEQH=false; gSweptEQL=false;
       gPO3 = SPO3State();
       gStats.peakEquity = MathMax(gStats.peakEquity, AccountInfoDouble(ACCOUNT_EQUITY));
    }
@@ -2980,43 +2871,12 @@ void OnTick()
    ManageTrades();
    CheckFridayClose();
    CheckForEntry();
-
-   // Throttle panel redraws to max 2 per second — eliminates tick-rate flash
-   static uint lastPanelMs = 0;
-   uint nowMs = GetTickCount();
-   if(nowMs - lastPanelMs >= 500)
-   {
-      lastPanelMs = nowMs;
-      UpdatePanel();
-   }
+   UpdatePanel();
 }
 
 void OnChartEvent(const int id, const long& lp, const double& dp, const string& sp)
 {
-   // Toggle whole-panel collapse
-   if(id == CHARTEVENT_OBJECT_CLICK && sp == "ATLASP_BTN")
-   {
-      gPanelCollapsed = !gPanelCollapsed;
-      UpdatePanel();
-      return;
-   }
-
-   // Toggle individual section collapse
-   if(id == CHARTEVENT_OBJECT_CLICK)
-   {
-      if(sp=="ATLASP_BTN_BIAS")     { gSecBias    =!gSecBias;     ObjectSetInteger(0,sp,OBJPROP_STATE,false); UpdatePanel(); return; }
-      if(sp=="ATLASP_BTN_SWEEP")    { gSecSweep   =!gSecSweep;    ObjectSetInteger(0,sp,OBJPROP_STATE,false); UpdatePanel(); return; }
-      if(sp=="ATLASP_BTN_CHAIN")    { gSecChain   =!gSecChain;    ObjectSetInteger(0,sp,OBJPROP_STATE,false); UpdatePanel(); return; }
-      if(sp=="ATLASP_BTN_FVG")      { gSecFVG     =!gSecFVG;      ObjectSetInteger(0,sp,OBJPROP_STATE,false); UpdatePanel(); return; }
-      if(sp=="ATLASP_BTN_FILTER")   { gSecFilter  =!gSecFilter;   ObjectSetInteger(0,sp,OBJPROP_STATE,false); UpdatePanel(); return; }
-      if(sp=="ATLASP_BTN_SESSION")  { gSecSession =!gSecSession;  ObjectSetInteger(0,sp,OBJPROP_STATE,false); UpdatePanel(); return; }
-      if(sp=="ATLASP_BTN_SCORE")    { gSecScore   =!gSecScore;    ObjectSetInteger(0,sp,OBJPROP_STATE,false); UpdatePanel(); return; }
-      if(sp=="ATLASP_BTN_DECISION") { gSecDecision=!gSecDecision; ObjectSetInteger(0,sp,OBJPROP_STATE,false); UpdatePanel(); return; }
-      if(sp=="ATLASP_BTN_RISK")     { gSecRisk    =!gSecRisk;     ObjectSetInteger(0,sp,OBJPROP_STATE,false); UpdatePanel(); return; }
-      if(sp=="ATLASP_BTN_STATS")    { gSecStats   =!gSecStats;    ObjectSetInteger(0,sp,OBJPROP_STATE,false); UpdatePanel(); return; }
-   }
-
-   // Panel drag — click on title bar to start, any other click to stop
+   // Panel drag support
    static bool dragging = false;
    static int  dxOff = 0, dyOff = 0;
 
