@@ -607,6 +607,8 @@ double        gEffMinSL    = 8.0;
 datetime      gNewsTimes[8];
 int           gNewsCount = 0;
 
+bool          gPanelCollapsed = false;
+
 // Per-day signal accounting
 int           gDailyChecked  = 0;   // bars where a valid setup was found
 int           gDailyRejected = 0;   // valid setups rejected (SL/lot/order fail)
@@ -2527,6 +2529,12 @@ void UpdatePanel()
    int row = 0;
    gPanY = y; gPanLH = lh;
 
+   int hdrH = lh + 16;
+
+   // Delete ghost labels when collapse state changes
+   static bool prevCollapsed = false;
+   if(prevCollapsed != gPanelCollapsed) { DeletePanel(); prevCollapsed = gPanelCollapsed; }
+
    // === BACKGROUND (create once; never reset YSIZE every tick — causes flash) ===
    if(ObjectFind(0, "ATLASP_BG") < 0)
    {
@@ -2537,15 +2545,26 @@ void UpdatePanel()
       ObjectSetInteger(0, "ATLASP_BG", OBJPROP_BGCOLOR,      COL_BG);
       ObjectSetInteger(0, "ATLASP_BG", OBJPROP_BORDER_COLOR, COL_BORDER);
       ObjectSetInteger(0, "ATLASP_BG", OBJPROP_XSIZE,        PANEL_W);
-      ObjectSetInteger(0, "ATLASP_BG", OBJPROP_YSIZE,        lh + 6);
+      ObjectSetInteger(0, "ATLASP_BG", OBJPROP_YSIZE,        hdrH);
    }
    ObjectSetInteger(0, "ATLASP_BG", OBJPROP_XDISTANCE, x-4);
    ObjectSetInteger(0, "ATLASP_BG", OBJPROP_YDISTANCE, y-4);
    ObjectSetInteger(0, "ATLASP_BG", OBJPROP_XSIZE,     PANEL_W);
-   RectSet("ATLASP_HDR", x-4, y-4, PANEL_W, lh + 6, COL_HDR, COL_BORDER);
+   RectSet("ATLASP_HDR", x-4, y-4, PANEL_W, hdrH, COL_HDR, COL_BORDER);
    string modeTag = ScalperMode ? " [SCALPER]" : (AggressiveMode ? " [AGGRESSIVE]" : "");
-   LabelSet("ATLASP_T", " ICT ATLAS EA V1.0  |  " + _Symbol + modeTag, x, RowY(row), COL_GOLD, 9);
+   LabelSet("ATLASP_T",   " ICT ATLAS EA V1.0  |  " + _Symbol + modeTag, x, y+4, COL_GOLD, 9);
+   LabelSet("ATLASP_BTN", gPanelCollapsed ? " [+]" : " [-]", x+PANEL_W-36, y+4, COL_GOLD, 9);
+
+   if(gPanelCollapsed)
+   {
+      static int prevHdrH = 0;
+      if(hdrH != prevHdrH) { ObjectSetInteger(0, "ATLASP_BG", OBJPROP_YSIZE, hdrH); prevHdrH = hdrH; }
+      ChartRedraw(0);
+      return;
+   }
+
    row = 2;
+   LabelSet("ATLASP_CR1", "  Created by: RATTANA CHHORM", x, RowY(row++), C'220,220,220', 9);
 
    // === BIAS ENGINE ===
    LabelSet("ATLASP_B0",  "--- BIAS ENGINE ----------------------", x, RowY(row++), COL_BLUE, 7);
@@ -3138,6 +3157,9 @@ void OnChartEvent(const int id, const long& lp, const double& dp, const string& 
    // Panel drag support
    static bool dragging = false;
    static int  dxOff = 0, dyOff = 0;
+
+   if(id == CHARTEVENT_OBJECT_CLICK && sp == "ATLASP_BTN")
+   { gPanelCollapsed = !gPanelCollapsed; UpdatePanel(); return; }
 
    if(id == CHARTEVENT_OBJECT_CLICK && sp == "ATLASP_T")
    { dragging = true; dxOff = (int)lp - gPanelX; dyOff = (int)dp - gPanelY; }
