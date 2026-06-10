@@ -607,6 +607,7 @@ bool gSweptAsianH=false, gSweptAsianL=false;
 bool gSweptEQH=false, gSweptEQL=false;
 
 // Per-section panel collapse state
+bool          gPanelCollapsed = false;
 bool gSecBias=true, gSecSweep=true, gSecChain=true, gSecFVG=false;
 bool gSecFilter=true, gSecSession=false, gSecScore=true;
 bool gSecDecision=true, gSecRisk=true, gSecStats=false;
@@ -2491,9 +2492,8 @@ void UpdateSecBtn(const string key, bool expanded)
 
 void UpdatePanel()
 {
-   if(!ShowPanel) return;
+   if(!ShowPanel) { DeletePanel(); return; }
 
-   const int HR = 1000;  // hidden row — RowY(HR) is far off-screen
    int x  = gPanelX;
    int y  = gPanelY;
    int lh = PANEL_LH;
@@ -2501,11 +2501,31 @@ void UpdatePanel()
    int row = 0;
    gPanY = y; gPanLH = lh;
 
-   // === HEADER ===
-   RectSet("ATLASP_BG",  x-4, y-4, PANEL_W, 10*lh+14, COL_BG, COL_BORDER);
-   RectSet("ATLASP_HDR", x-4, y-4, PANEL_W, lh + 6,   COL_HDR, COL_BORDER);
-   LabelSet("ATLASP_T", " ICT ATLAS EA V1.0  |  " + _Symbol, x, RowY(row), COL_GOLD, 9);
-   row = 2;
+   // Clear ghost labels when collapse state changes
+   static bool prevCollapsed = false;
+   if(prevCollapsed != gPanelCollapsed) { DeletePanel(); prevCollapsed = gPanelCollapsed; }
+
+   // === HEADER (always visible) ===
+   // BG height = 0 here; set to real height at end atomically with ChartRedraw → no flash
+   int hdrH = lh + 16;
+   RectSet("ATLASP_BG",  x-4, y-4, PANEL_W, 0,    COL_BG,  COL_BORDER);
+   RectSet("ATLASP_HDR", x-4, y-4, PANEL_W, hdrH, COL_HDR, COL_BORDER);
+   LabelSet("ATLASP_T",   " ICT ATLAS EA V1.0", x, y+4, COL_GOLD, 11);
+   LabelSet("ATLASP_BTN", gPanelCollapsed ? " [+]" : " [-]", x+PANEL_W-36, y+4, COL_GOLD, 11);
+   row = 3;
+
+   if(gPanelCollapsed)
+   {
+      ObjectSetInteger(0, "ATLASP_BG", OBJPROP_YSIZE, hdrH);
+      ChartRedraw(0);
+      return;
+   }
+
+   const int HR = 1000;  // off-screen row — RowY(1000) ≈ 14 000 px
+
+   // Creator credit
+   LabelSet("ATLASP_CR1", "  Created by: RATTANA CHHORM", x, RowY(row++), C'220,220,220', 9);
+   LabelSet("ATLASP_CR2", "  Symbol: "+_Symbol+"  |  "+EnumToString(_Period), x, RowY(row++), C'180,180,180', 8);
 
    // === BIAS ENGINE ===
    SectionHeader("BIAS", "BIAS ENGINE", row, x, lh);
@@ -2611,19 +2631,10 @@ void UpdatePanel()
      LabelSet("ATLASP_SE4L","Market Cond :", x, RowY(r), COL_TXT, 8);
      LabelSet("ATLASP_SE4V", EnumToString(gCond.condition)+" (ADX="+DoubleToString(gCond.adxValue,1)+")",
               vx, RowY(r++), ConditionAllowsTrade()?COL_GREEN:COL_RED, 8);
-     if(UseSMTFilter)
-     { LabelSet("ATLASP_SM1L","SMT Diverg  :", x, RowY(r), COL_TXT, 8);
-       LabelSet("ATLASP_SM1V", gSMT.valid?(gSMT.bullishDivergence?"BULL SMT":"BEAR SMT"):"NONE",
-                vx, RowY(r++), gSMT.valid?COL_GREEN:COL_TXT, 8); }
-     if(UsePO3Filter)
-     { LabelSet("ATLASP_PO1L","PO3 (AMD)   :", x, RowY(r), COL_TXT, 8);
-       LabelSet("ATLASP_PO1V", gPO3.valid?(gPO3.bullish?"BULL AMD":"BEAR AMD"):(gPO3.manipDone?"MANIP":"ACCUM"),
-                vx, RowY(r++), gPO3.valid?COL_GREEN:COL_GOLD, 8); }
      if(gSecFilter) row = r;
    }
 
    // === SESSION & P/D ===
-   row++;
    SectionHeader("SESSION", "SESSION & P/D", row, x, lh);
    UpdateSecBtn("SESSION", gSecSession);
    { int r = gSecSession ? row : HR;
@@ -2634,8 +2645,19 @@ void UpdatePanel()
      else if(pdpct >= 50) pdLabel = DoubleToString(pdpct,0)+"% PREMIUM";
      else                 pdLabel = DoubleToString(pdpct,0)+"% DISCOUNT";
      LabelSet("ATLASP_SE5L","P/D Zone    :", x, RowY(r), COL_TXT, 8);
-     LabelSet("ATLASP_SE5V", pdLabel, vx, RowY(r++),
-              (pdpct>100||pdpct<0)?COL_RED:COL_GOLD, 8);
+     LabelSet("ATLASP_SE5V", pdLabel, vx, RowY(r++), (pdpct>100||pdpct<0)?COL_RED:COL_GOLD, 8);
+     if(UseSMTFilter)
+     {
+        LabelSet("ATLASP_SM1L","SMT Diverg  :", x, RowY(r), COL_TXT, 8);
+        LabelSet("ATLASP_SM1V", gSMT.valid?(gSMT.bullishDivergence?"BULL SMT":"BEAR SMT"):"NONE",
+                 vx, RowY(r++), gSMT.valid?COL_GREEN:COL_TXT, 8);
+     }
+     if(UsePO3Filter)
+     {
+        LabelSet("ATLASP_PO1L","PO3 (AMD)   :", x, RowY(r), COL_TXT, 8);
+        LabelSet("ATLASP_PO1V", gPO3.valid?(gPO3.bullish?"BULL AMD":"BEAR AMD"):(gPO3.manipDone?"MANIP":"ACCUM"),
+                 vx, RowY(r++), gPO3.valid?COL_GREEN:COL_GOLD, 8);
+     }
      if(gSecSession) row = r;
    }
 
@@ -2990,6 +3012,9 @@ void OnChartEvent(const int id, const long& lp, const double& dp, const string& 
       if(sp=="ATLASP_BTN_RISK")    { gSecRisk    =!gSecRisk;    ObjectSetInteger(0,sp,OBJPROP_STATE,false); UpdatePanel(); return; }
       if(sp=="ATLASP_BTN_STATS")   { gSecStats   =!gSecStats;   ObjectSetInteger(0,sp,OBJPROP_STATE,false); UpdatePanel(); return; }
    }
+
+   if(id == CHARTEVENT_OBJECT_CLICK && sp == "ATLASP_BTN")
+   { gPanelCollapsed = !gPanelCollapsed; UpdatePanel(); return; }
 
    if(id == CHARTEVENT_OBJECT_CLICK && sp == "ATLASP_T")
    { dragging = true; dxOff = (int)lp - gPanelX; dyOff = (int)dp - gPanelY; }
