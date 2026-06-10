@@ -512,6 +512,11 @@ struct STradeStats
    // Per model
    int     pdlModelTotal, pdlModelWins;
    int     pdhModelTotal, pdhModelWins;
+   double  pdlModelSumRR;
+   double  pdhModelSumRR;
+   // Avg SL tracking
+   double  sumSLPips;
+   int     slCount;
 };
 
 //===================================================================
@@ -606,6 +611,19 @@ int           gNewsCount = 0;
 int           gDailyChecked  = 0;   // bars where a valid setup was found
 int           gDailyRejected = 0;   // valid setups rejected (SL/lot/order fail)
 int           gDailyExec     = 0;   // trades actually placed today
+
+// Per-filter rejection counters (lifetime, resets on EA restart)
+int           gRejSweep   = 0;
+int           gRejMSS     = 0;
+int           gRejDisp    = 0;
+int           gRejFVG     = 0;
+int           gRejSession = 0;
+int           gRejADR     = 0;
+int           gRejPD      = 0;
+int           gRejSLSize  = 0;
+int           gRejScore   = 0;
+int           gRejOther   = 0;
+string        gLastRejectReason = "";
 
 //===================================================================
 // SECTION 5 — UTILITY FUNCTIONS
@@ -2098,12 +2116,16 @@ bool PlaceTrade(bool bullish)
    {
       Print("TRADE BLOCKED: SL too small = ", DoubleToString(slPips,1), " pips (min=", DoubleToString(gEffMinSL,1), ")");
       AddFailReason("SL too small: " + DoubleToString(slPips,1) + "p");
+      gRejSLSize++;
+      gLastRejectReason = "SL too small: " + DoubleToString(slPips,1) + "p";
       return false;
    }
    if(slPips > gEffMaxSL)
    {
       Print("TRADE BLOCKED: SL too large = ", DoubleToString(slPips,1), " pips (max=", DoubleToString(gEffMaxSL,1), ")");
       AddFailReason("SL too large: " + DoubleToString(slPips,1) + "p");
+      gRejSLSize++;
+      gLastRejectReason = "SL too large: " + DoubleToString(slPips,1) + "p";
       return false;
    }
 
@@ -2135,6 +2157,8 @@ bool PlaceTrade(bool bullish)
    gRisk.dailyTrades++;
    gDailyExec++;
    gLastTradeClose = 0;
+   gStats.sumSLPips += slPips;
+   gStats.slCount++;
 
    gTrade.ticket    = ticket;
    gTrade.entryPrice= entry;
@@ -2319,9 +2343,9 @@ void OnTradeClose(ulong ticket, double profit, bool isLong, double rr)
    { gStats.asianTotal++;  if(profit > 0) gStats.asianWins++; }
 
    if(StringFind(gTrade.model, "PDL") >= 0)
-   { gStats.pdlModelTotal++; if(profit > 0) gStats.pdlModelWins++; }
+   { gStats.pdlModelTotal++; if(profit > 0) gStats.pdlModelWins++; gStats.pdlModelSumRR += rr; }
    else
-   { gStats.pdhModelTotal++; if(profit > 0) gStats.pdhModelWins++; }
+   { gStats.pdhModelTotal++; if(profit > 0) gStats.pdhModelWins++; gStats.pdhModelSumRR += rr; }
 
    // Persist via GlobalVariable
    string pfx = "ATLAS_" + _Symbol + "_";
@@ -2503,9 +2527,21 @@ void UpdatePanel()
    int row = 0;
    gPanY = y; gPanLH = lh;
 
-   // === BACKGROUND ===
-   int totalH = 95 * lh + 14;
-   RectSet("ATLASP_BG",  x-4, y-4, PANEL_W, totalH, COL_BG, COL_BORDER);
+   // === BACKGROUND (create once; never reset YSIZE every tick — causes flash) ===
+   if(ObjectFind(0, "ATLASP_BG") < 0)
+   {
+      ObjectCreate(0, "ATLASP_BG", OBJ_RECTANGLE_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, "ATLASP_BG", OBJPROP_CORNER,       CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, "ATLASP_BG", OBJPROP_BACK,         false);
+      ObjectSetInteger(0, "ATLASP_BG", OBJPROP_SELECTABLE,   false);
+      ObjectSetInteger(0, "ATLASP_BG", OBJPROP_BGCOLOR,      COL_BG);
+      ObjectSetInteger(0, "ATLASP_BG", OBJPROP_BORDER_COLOR, COL_BORDER);
+      ObjectSetInteger(0, "ATLASP_BG", OBJPROP_XSIZE,        PANEL_W);
+      ObjectSetInteger(0, "ATLASP_BG", OBJPROP_YSIZE,        lh + 6);
+   }
+   ObjectSetInteger(0, "ATLASP_BG", OBJPROP_XDISTANCE, x-4);
+   ObjectSetInteger(0, "ATLASP_BG", OBJPROP_YDISTANCE, y-4);
+   ObjectSetInteger(0, "ATLASP_BG", OBJPROP_XSIZE,     PANEL_W);
    RectSet("ATLASP_HDR", x-4, y-4, PANEL_W, lh + 6, COL_HDR, COL_BORDER);
    string modeTag = ScalperMode ? " [SCALPER]" : (AggressiveMode ? " [AGGRESSIVE]" : "");
    LabelSet("ATLASP_T", " ICT ATLAS EA V1.0  |  " + _Symbol + modeTag, x, RowY(row), COL_GOLD, 9);
@@ -2727,12 +2763,29 @@ void UpdatePanel()
    if(gSetupReady)
       LabelSet("ATLASP_DM", "  Model: "+gTrade.model, x, RowY(row++), COL_GOLD, 7);
 
+   // Live RR of open position
+   if(gTrade.ticket > 0 && HasOpenPosition())
+   {
+      double cp      = gTrade.isLong ? SymbolInfoDouble(_Symbol, SYMBOL_BID)
+                                     : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      double slPipsNow = ToPips(MathAbs(gTrade.entryPrice - gTrade.sl));
+      double liveP     = ToPips(MathAbs(cp - gTrade.entryPrice));
+      bool   inProfit  = gTrade.isLong ? cp > gTrade.entryPrice : cp < gTrade.entryPrice;
+      double liveRR    = slPipsNow > 0 ? (inProfit ? 1.0 : -1.0) * liveP / slPipsNow : 0;
+      color  rrClr     = liveRR >= 1.0 ? COL_GREEN : liveRR >= 0 ? COL_GOLD : COL_RED;
+      LabelSet("ATLASP_LVRR", "  Live RR: "+DoubleToString(liveRR,2)+"R  SL="+DoubleToString(slPipsNow,1)+"p",
+               x, RowY(row++), rrClr, 8);
+   }
+
    // === RISK STATE ===
    row++;
    LabelSet("ATLASP_R0",  "--- RISK STATE -----------------------", x, RowY(row++), COL_BLUE, 7);
    LabelSet("ATLASP_R1L", "Daily P&L   :", x, RowY(row), COL_TXT, 8);
    LabelSet("ATLASP_R1V", "$"+DoubleToString(gRisk.dailyPnL,2)+" ("+DoubleToString(gRisk.dailyR,2)+"R)",
             vx, RowY(row++), gRisk.dailyPnL>=0?COL_GREEN:COL_RED, 8);
+   LabelSet("ATLASP_RW1L","Weekly P&L  :", x, RowY(row), COL_TXT, 8);
+   LabelSet("ATLASP_RW1V","$"+DoubleToString(gRisk.weeklyPnL,2)+" ("+DoubleToString(gRisk.weeklyR,2)+"R)",
+            vx, RowY(row++), gRisk.weeklyPnL>=0?COL_GREEN:COL_RED, 8);
    LabelSet("ATLASP_R2L", "Trades Today:", x, RowY(row), COL_TXT, 8);
    LabelSet("ATLASP_R2V", IntegerToString(gRisk.dailyTrades)+"/"+IntegerToString(MaxTradesPerDay),
             vx, RowY(row++), COL_GOLD, 8);
@@ -2767,18 +2820,55 @@ void UpdatePanel()
       LabelSet("ATLASP_ST4V", DoubleToString(GetAvgRR(),2)+"R", vx, RowY(row++), COL_GOLD, 8);
       if(gStats.pdlModelTotal > 0 || gStats.pdhModelTotal > 0)
       {
-         double pdlWR = gStats.pdlModelTotal>0?100.0*gStats.pdlModelWins/gStats.pdlModelTotal:0;
+         double pdlWR    = gStats.pdlModelTotal>0 ? 100.0*gStats.pdlModelWins/gStats.pdlModelTotal : 0;
+         double pdlAvgRR = gStats.pdlModelTotal>0 ? gStats.pdlModelSumRR/gStats.pdlModelTotal : 0;
          LabelSet("ATLASP_ST5L","PDL Model   :", x, RowY(row), COL_TXT, 8);
-         LabelSet("ATLASP_ST5V", IntegerToString(gStats.pdlModelTotal)+"t / "+DoubleToString(pdlWR,0)+"%WR",
+         LabelSet("ATLASP_ST5V", IntegerToString(gStats.pdlModelTotal)+"t  "+DoubleToString(pdlWR,0)+"%WR  "+DoubleToString(pdlAvgRR,2)+"R",
                   vx, RowY(row++), COL_GOLD, 8);
-         double pdhWR = gStats.pdhModelTotal>0?100.0*gStats.pdhModelWins/gStats.pdhModelTotal:0;
+         double pdhWR    = gStats.pdhModelTotal>0 ? 100.0*gStats.pdhModelWins/gStats.pdhModelTotal : 0;
+         double pdhAvgRR = gStats.pdhModelTotal>0 ? gStats.pdhModelSumRR/gStats.pdhModelTotal : 0;
          LabelSet("ATLASP_ST6L","PDH Model   :", x, RowY(row), COL_TXT, 8);
-         LabelSet("ATLASP_ST6V", IntegerToString(gStats.pdhModelTotal)+"t / "+DoubleToString(pdhWR,0)+"%WR",
+         LabelSet("ATLASP_ST6V", IntegerToString(gStats.pdhModelTotal)+"t  "+DoubleToString(pdhWR,0)+"%WR  "+DoubleToString(pdhAvgRR,2)+"R",
                   vx, RowY(row++), COL_GOLD, 8);
+      }
+      if(gStats.slCount > 0)
+      {
+         LabelSet("ATLASP_ST7L","Avg SL Size :", x, RowY(row), COL_TXT, 8);
+         LabelSet("ATLASP_ST7V", DoubleToString(gStats.sumSLPips/gStats.slCount,1)+"p  (n="+IntegerToString(gStats.slCount)+")",
+                  vx, RowY(row++), COL_GOLD, 8);
+      }
+
+      // Per-filter rejection breakdown
+      row++;
+      LabelSet("ATLASP_RF0", "--- REJECTION BREAKDOWN --------------", x, RowY(row++), COL_BLUE, 7);
+      LabelSet("ATLASP_RF1L","Session     :", x, RowY(row), COL_TXT, 8);
+      LabelSet("ATLASP_RF1V", IntegerToString(gRejSession), vx, RowY(row++), COL_RED, 8);
+      LabelSet("ATLASP_RF2L","MSS         :", x, RowY(row), COL_TXT, 8);
+      LabelSet("ATLASP_RF2V", IntegerToString(gRejMSS),     vx, RowY(row++), COL_RED, 8);
+      LabelSet("ATLASP_RF3L","Displacement:", x, RowY(row), COL_TXT, 8);
+      LabelSet("ATLASP_RF3V", IntegerToString(gRejDisp),    vx, RowY(row++), COL_RED, 8);
+      LabelSet("ATLASP_RF4L","FVG         :", x, RowY(row), COL_TXT, 8);
+      LabelSet("ATLASP_RF4V", IntegerToString(gRejFVG),     vx, RowY(row++), COL_RED, 8);
+      LabelSet("ATLASP_RF5L","ADR         :", x, RowY(row), COL_TXT, 8);
+      LabelSet("ATLASP_RF5V", IntegerToString(gRejADR),     vx, RowY(row++), COL_RED, 8);
+      LabelSet("ATLASP_RF6L","P/D Zone    :", x, RowY(row), COL_TXT, 8);
+      LabelSet("ATLASP_RF6V", IntegerToString(gRejPD),      vx, RowY(row++), COL_RED, 8);
+      LabelSet("ATLASP_RF7L","SL Size     :", x, RowY(row), COL_TXT, 8);
+      LabelSet("ATLASP_RF7V", IntegerToString(gRejSLSize),  vx, RowY(row++), COL_RED, 8);
+      LabelSet("ATLASP_RF8L","Score/Bias  :", x, RowY(row), COL_TXT, 8);
+      LabelSet("ATLASP_RF8V", IntegerToString(gRejScore),   vx, RowY(row++), COL_RED, 8);
+      LabelSet("ATLASP_RF9L","Sweep       :", x, RowY(row), COL_TXT, 8);
+      LabelSet("ATLASP_RF9V", IntegerToString(gRejSweep),   vx, RowY(row++), COL_RED, 8);
+      if(gLastRejectReason != "")
+      {
+         LabelSet("ATLASP_RFLL","Last Rej    :", x, RowY(row), COL_TXT, 8);
+         LabelSet("ATLASP_RFLV", gLastRejectReason, vx, RowY(row++), COL_RED, 7);
       }
    }
 
-   ObjectSetInteger(0, "ATLASP_BG", OBJPROP_YSIZE, row * lh + 14);
+   static int prevBGH = -1;
+   int newBGH = row * lh + 14;
+   if(newBGH != prevBGH) { ObjectSetInteger(0, "ATLASP_BG", OBJPROP_YSIZE, newBGH); prevBGH = newBGH; }
    ChartRedraw(0);
 }
 
@@ -2848,6 +2938,22 @@ void RunAllEngines()
    ParseNewsTimes();
 }
 
+void TrackRejection(const string reason)
+{
+   gLastRejectReason = reason;
+   if     (StringFind(reason, "Sweep") >= 0 || StringFind(reason, "sweep") >= 0) gRejSweep++;
+   else if(StringFind(reason, "MSS")   >= 0) gRejMSS++;
+   else if(StringFind(reason, "Disp")  >= 0) gRejDisp++;
+   else if(StringFind(reason, "FVG")   >= 0) gRejFVG++;
+   else if(StringFind(reason, "Kill")  >= 0 || StringFind(reason, "session") >= 0) gRejSession++;
+   else if(StringFind(reason, "ADR")   >= 0) gRejADR++;
+   else if(StringFind(reason, "P/D")   >= 0) gRejPD++;
+   else if(StringFind(reason, "SL t")  >= 0) gRejSLSize++;
+   else if(StringFind(reason, "Score") >= 0 || StringFind(reason, "Grade") >= 0 ||
+           StringFind(reason, "Bias")  >= 0) gRejScore++;
+   else gRejOther++;
+}
+
 void CheckForEntry()
 {
    if(!CanTrade()) return;
@@ -2912,6 +3018,7 @@ void CheckForEntry()
    gScore     = primaryScore;
    gCurGrade  = primaryGrade;
    gSetupReady = false;
+   if(primaryScore.failCount > 0) TrackRejection(primaryScore.failReasons[0]);
 
    if(DebugLogs && isNewBar)
    {
