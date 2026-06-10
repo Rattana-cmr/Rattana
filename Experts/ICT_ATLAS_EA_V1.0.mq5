@@ -1973,20 +1973,23 @@ bool CanTrade()
 
 bool ValidateSetup(bool bullish)
 {
-   // Hard block: session/killzone must be active when filter is on
-   if(UseSessionFilter && !InKillzone())
+   // Always compute score first so panel shows real values even outside session
+   CalcConfluenceScore(bullish);
+   gCurGrade = CalcGrade(gScore.total);
+
+   // Hard block: session/killzone
+   bool inKZ = ExpandKillzones ? InExpandedKillzone() : InKillzone();
+   if(UseSessionFilter && !inKZ)
    {
       AddFailReason("Killzone: Outside session");
       return false;
    }
 
-   CalcConfluenceScore(bullish);
-   gCurGrade = CalcGrade(gScore.total);
-
-   int effectiveMinScore = (UseRelaxedMode) ? RelaxedMinScore : MinScore;
+   int effectiveMinScore = UseRelaxedMode ? RelaxedMinScore : MinScore;
    if(UseScoringSystem && gScore.total < effectiveMinScore)
    {
-      AddFailReason("Score: " + IntegerToString(gScore.total) + " < " + IntegerToString(effectiveMinScore) +
+      AddFailReason("Score: " + IntegerToString(gScore.total) + " < " +
+                    IntegerToString(effectiveMinScore) +
                     (UseRelaxedMode ? " (RELAXED)" : ""));
       return false;
    }
@@ -2009,7 +2012,6 @@ bool ValidateSetup(bool bullish)
       return false;
    }
 
-   // Score threshold is the gate — fail reasons are for panel display only
    return true;
 }
 
