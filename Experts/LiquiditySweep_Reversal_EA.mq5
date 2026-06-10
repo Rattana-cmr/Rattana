@@ -119,7 +119,7 @@ input double   InpSpreadLimitDefault = 2.0;
 
 input group "=== Dashboard Settings ==="
 input bool     InpShowDashboard    = true;
-input int      InpDashboardCorner  = 1;
+input int      InpDashboardCorner  = 0;  // 0=top-left  1=top-right  2=bottom-right  3=bottom-left
 input int      InpDashboardXOffset = 10;
 input int      InpDashboardYOffset = 10;
 
