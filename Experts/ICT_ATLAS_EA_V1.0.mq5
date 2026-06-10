@@ -310,6 +310,23 @@ input bool   ShowPanel           = true;   // Show debug panel
 input int    PanelX              = 12;     // Panel X position
 input int    PanelY              = 30;     // Panel Y position
 input bool   ShowStatPanel       = true;   // Show statistics section
+input bool   DebugLogs           = false;  // Print decision logs to journal
+
+input group "══════════ [29] AGGRESSIVE MODE ══════════"
+input bool   AggressiveMode      = false;  // High-frequency mode (relaxed filters)
+input int    AggrMinScore        = 55;     // Minimum score in aggressive mode
+input bool   AggrMSSOptional     = true;   // MSS optional when sweep+disp present
+input bool   AggrDispOptional    = false;  // Displacement optional in aggressive mode
+input double AggrDispMinBodyPct  = 0.40;   // Relaxed displacement body %
+input double AggrDispMinATRMulti = 0.60;   // Relaxed displacement ATR multiplier
+input bool   AggrRequireFVG      = false;  // Require FVG in aggressive mode
+input bool   AggrStrictPremDisc  = false;  // Enforce P/D zone in aggressive mode
+input double AggrADRMaxPct       = 1.20;   // Relaxed ADR completion cap
+input bool   AggrStrictKillzone  = false;  // Require killzone in aggressive mode
+input bool   AllowContinuation   = true;   // Allow trade without sweep when bias aligned
+input bool   ExpandKillzones     = false;  // Expand each session window by ±2 hours
+input bool   ScalperMode         = false;  // Scalper mode (further relaxed thresholds)
+input int    ScalperMinScore     = 40;     // Minimum score in scalper mode
 
 //===================================================================
 // SECTION 3 — DATA STRUCTURES
@@ -511,6 +528,11 @@ int           gLiqCount    = 0;
 bool          gSweepDone   = false;
 bool          gSweepBull   = false;   // true = sell-side sweep (bullish setup)
 datetime      gSweepTime   = 0;
+// Per-type sweep tracking for dashboard diagnostics
+bool          gSweptPDH = false, gSweptPDL = false;
+bool          gSweptPWH = false, gSweptPWL = false;
+bool          gSweptAsianH = false, gSweptAsianL = false;
+bool          gSweptEQH = false, gSweptEQL = false;
 SMSSState     gMSS;
 SDispState    gDisp;
 SFVGZone      gFVGs[20];
@@ -962,46 +984,74 @@ void RunLiquidityEngine()
                AddLiqLevel((swingL[a] + swingL[b]) * 0.5, "EQL");
    }
 
-   // Expire stale sweep state (4-hour window)
-   if(gSweepDone && TimeCurrent() - gSweepTime > 4 * 3600)
+   bool aggrMode = AggressiveMode || ScalperMode;
+
+   // Expire stale sweep state (8h aggressive / 4h conservative)
+   int expirySecs = aggrMode ? 8 * 3600 : 4 * 3600;
+   if(gSweepDone && TimeCurrent() - gSweepTime > expirySecs)
    {
       gSweepDone = false;
       gMSS.valid = false;
       gDisp.valid = false;
+      gSweptPDH=false; gSweptPDL=false; gSweptPWH=false; gSweptPWL=false;
+      gSweptAsianH=false; gSweptAsianL=false; gSweptEQH=false; gSweptEQL=false;
    }
 
-   // Check for new sweeps on the just-completed bar
-   double barHigh  = iHigh (_Symbol, PERIOD_M15, 1);
-   double barLow   = iLow  (_Symbol, PERIOD_M15, 1);
-   double barClose = iClose(_Symbol, PERIOD_M15, 1);
-   double minWick  = Pips(SweepWickMinPips);
+   // Minimum wick: 0.5p aggressive, SweepWickMinPips conservative
+   double minWick = Pips(aggrMode ? MathMin(0.5, SweepWickMinPips) : SweepWickMinPips);
+   // Scan more bars in aggressive mode
+   int scanBars = aggrMode ? 5 : 2;
 
-   for(int i = 0; i < gLiqCount; i++)
+   for(int bar = 1; bar <= scanBars; bar++)
    {
-      if(!gLiqLevels[i].valid || gLiqLevels[i].swept) continue;
-      double lvl = gLiqLevels[i].price;
+      double barHigh  = iHigh (_Symbol, PERIOD_M15, bar);
+      double barLow   = iLow  (_Symbol, PERIOD_M15, bar);
+      double barClose = iClose(_Symbol, PERIOD_M15, bar);
 
-      // Sell-side sweep: wick below, close back above → bullish setup
-      if(barLow < lvl - minWick && barClose > lvl)
+      for(int i = 0; i < gLiqCount; i++)
       {
-         gLiqLevels[i].swept       = true;
-         gLiqLevels[i].bullishSweep = true;
-         gLiqLevels[i].sweepTime   = iTime(_Symbol, PERIOD_M15, 1);
-         gSweepDone = true;
-         gSweepBull = true;
-         gSweepTime = gLiqLevels[i].sweepTime;
-         if(DrawLiqSweeps) DrawSweepMark(lvl, iTime(_Symbol, PERIOD_M15, 1), true);
-      }
-      // Buy-side sweep: wick above, close back below → bearish setup
-      else if(barHigh > lvl + minWick && barClose < lvl)
-      {
-         gLiqLevels[i].swept       = true;
-         gLiqLevels[i].bullishSweep = false;
-         gLiqLevels[i].sweepTime   = iTime(_Symbol, PERIOD_M15, 1);
-         gSweepDone = true;
-         gSweepBull = false;
-         gSweepTime = gLiqLevels[i].sweepTime;
-         if(DrawLiqSweeps) DrawSweepMark(lvl, iTime(_Symbol, PERIOD_M15, 1), false);
+         if(!gLiqLevels[i].valid || gLiqLevels[i].swept) continue;
+         double lvl  = gLiqLevels[i].price;
+         string tag  = gLiqLevels[i].tag;
+
+         // Sell-side sweep: wick below, close back above → bullish setup
+         if(barLow < lvl - minWick && barClose > lvl)
+         {
+            gLiqLevels[i].swept        = true;
+            gLiqLevels[i].bullishSweep = true;
+            gLiqLevels[i].sweepTime    = iTime(_Symbol, PERIOD_M15, bar);
+            gSweepDone = true;
+            gSweepBull = true;
+            gSweepTime = gLiqLevels[i].sweepTime;
+            if(tag=="PDL")    gSweptPDL    = true;
+            if(tag=="PDH")    gSweptPDH    = true;
+            if(tag=="PWL")    gSweptPWL    = true;
+            if(tag=="PWH")    gSweptPWH    = true;
+            if(tag=="AsianL") gSweptAsianL = true;
+            if(tag=="AsianH") gSweptAsianH = true;
+            if(tag=="EQL")    gSweptEQL    = true;
+            if(tag=="EQH")    gSweptEQH    = true;
+            if(DrawLiqSweeps) DrawSweepMark(lvl, gLiqLevels[i].sweepTime, true);
+         }
+         // Buy-side sweep: wick above, close back below → bearish setup
+         else if(barHigh > lvl + minWick && barClose < lvl)
+         {
+            gLiqLevels[i].swept        = true;
+            gLiqLevels[i].bullishSweep = false;
+            gLiqLevels[i].sweepTime    = iTime(_Symbol, PERIOD_M15, bar);
+            gSweepDone = true;
+            gSweepBull = false;
+            gSweepTime = gLiqLevels[i].sweepTime;
+            if(tag=="PDH")    gSweptPDH    = true;
+            if(tag=="PDL")    gSweptPDL    = true;
+            if(tag=="PWH")    gSweptPWH    = true;
+            if(tag=="PWL")    gSweptPWL    = true;
+            if(tag=="AsianH") gSweptAsianH = true;
+            if(tag=="AsianL") gSweptAsianL = true;
+            if(tag=="EQH")    gSweptEQH    = true;
+            if(tag=="EQL")    gSweptEQL    = true;
+            if(DrawLiqSweeps) DrawSweepMark(lvl, gLiqLevels[i].sweepTime, false);
+         }
       }
    }
    // gSweepDone persists across bars until stale timer expires or explicit reset
@@ -1076,14 +1126,23 @@ void RunMSSEngine()
 
 void RunDisplacementEngine()
 {
-   if(!gMSS.valid) { gDisp.valid = false; return; }
+   bool aggrMode = AggressiveMode || ScalperMode;
+   if(!gMSS.valid)
+   {
+      // In aggressive mode with AggrMSSOptional: allow displacement check even without MSS
+      if(!(aggrMode && AggrMSSOptional && gSweepDone))
+      { gDisp.valid = false; return; }
+   }
    if(gDisp.valid) return;   // already confirmed, persist with sweep state
 
    double atr = GetATRMain(1);
    if(atr <= 0) return;
 
    ENUM_TIMEFRAMES tf = PERIOD_M15;
-   int lb = DispLookbackBars;
+   int lb = aggrMode ? MathMax(DispLookbackBars, 8) : DispLookbackBars;
+
+   double minBody = aggrMode ? AggrDispMinBodyPct  : DispMinBodyPct;
+   double minATR  = aggrMode ? AggrDispMinATRMulti : DispMinATRMulti;
 
    for(int i = 1; i <= lb; i++)
    {
@@ -1098,8 +1157,8 @@ void RunDisplacementEngine()
       double bodyPct  = body / range;
       double atrRatio = range / atr;
 
-      if(bodyPct  < DispMinBodyPct)   continue;
-      if(atrRatio < DispMinATRMulti)  continue;
+      if(bodyPct  < minBody) continue;
+      if(atrRatio < minATR)  continue;
 
       bool isBullDisp = (c > o) && gSweepBull;
       bool isBearDisp = (c < o) && !gSweepBull;
@@ -1117,6 +1176,14 @@ void RunDisplacementEngine()
          gDisp.valid     = true;
          return;
       }
+   }
+
+   // In aggressive mode with AggrDispOptional: mark valid even without candle
+   if(aggrMode && AggrDispOptional && gSweepDone)
+   {
+      gDisp.bullish  = gSweepBull;
+      gDisp.bearish  = !gSweepBull;
+      gDisp.valid    = true;
    }
 }
 
@@ -1215,11 +1282,15 @@ void ScanFVGs()
 bool PriceInFVG(bool bullish, double& fvgTop, double& fvgBot, double& fvgCE)
 {
    double curC = iClose(_Symbol, PERIOD_M15, 0);
+   int checked = 0, mitigated = 0, wrongDir = 0, outsideZone = 0;
+
    for(int i = 0; i < gFVGCount; i++)
    {
       SFVGZone z = gFVGs[i];
-      if(!z.valid || z.mitigated) continue;
-      if(z.bullish != bullish)    continue;
+      if(!z.valid) continue;
+      if(z.mitigated)         { mitigated++;  continue; }
+      if(z.bullish != bullish){ wrongDir++;   continue; }
+      checked++;
       if(curC >= z.bottom && curC <= z.top)
       {
          fvgTop = z.top;
@@ -1227,7 +1298,12 @@ bool PriceInFVG(bool bullish, double& fvgTop, double& fvgBot, double& fvgCE)
          fvgCE  = z.ce;
          return true;
       }
+      outsideZone++;
    }
+
+   if(DebugLogs && (checked > 0 || mitigated > 0))
+      Print(StringFormat("FVG check [%s]: %d valid, %d mitigated, %d wrong-dir, %d outside zone. Price=%.5f",
+            bullish?"BULL":"BEAR", checked, mitigated, wrongDir, outsideZone, curC));
    return false;
 }
 
@@ -1430,11 +1506,12 @@ ENUM_ATLAS_SESSION GetCurrentSession()
    int h = dt.hour;
    int m = dt.min;
    double hf = h + m / 60.0;
+   double ex = ExpandKillzones ? 2.0 : 0.0;
 
-   if(SessionAsian  && hf >= AsianStartHour  && hf < AsianEndHour)  return SES_ASIAN;
-   if(SessionLondon && hf >= LondonStartHour && hf < LondonEndHour) return SES_LONDON;
-   if(SessionNewYork && hf >= NYStartHour    && hf < NYEndHour)     return SES_NEWYORK;
-   if(SessionNYPM   && hf >= NYPMStartHour   && hf < NYPMEndHour)   return SES_NEWYORK;
+   if(SessionAsian   && hf >= AsianStartHour  - ex && hf < AsianEndHour  + ex) return SES_ASIAN;
+   if(SessionLondon  && hf >= LondonStartHour - ex && hf < LondonEndHour + ex) return SES_LONDON;
+   if(SessionNewYork && hf >= NYStartHour     - ex && hf < NYEndHour     + ex) return SES_NEWYORK;
+   if(SessionNYPM    && hf >= NYPMStartHour   - ex && hf < NYPMEndHour   + ex) return SES_NEWYORK;
    return SES_NONE;
 }
 
@@ -1690,54 +1767,65 @@ void CalcConfluenceScore(bool bullish)
    gScore.total         = 0;
    gScore.failCount     = 0;
 
+   bool aggrMode    = AggressiveMode || ScalperMode;
+   bool sweepPresent = gSweepDone && gSweepBull == bullish;
+   ENUM_ATLAS_BIAS weeklyDir = bullish ? BIAS_BULLISH : BIAS_BEARISH;
+
    // Weekly bias
-   if(!RequireWeeklyBias || (bullish ? gBias.weekly == BIAS_BULLISH : gBias.weekly == BIAS_BEARISH))
+   if(!RequireWeeklyBias || gBias.weekly == weeklyDir)
       gScore.weeklyBias = ScoreWeeklyBias;
    else AddFailReason("Weekly Bias: " + BiasStr(gBias.weekly) +
                       (bullish ? " (need BULLISH)" : " (need BEARISH)"));
 
-   // Daily bias — with H4+H1 override for NEUTRAL days:
-   //   Full score  : Daily direction matches
-   //   Half score  : Daily is NEUTRAL but H4 + H1 both confirm direction
-   //   Zero + fail : Daily actively opposes direction
-   bool dailyMatch    = bullish ? gBias.daily == BIAS_BULLISH : gBias.daily == BIAS_BEARISH;
-   bool dailyNeutral  = (gBias.daily == BIAS_NEUTRAL);
-   bool h4Confirm     = bullish ? gBias.h4 == BIAS_BULLISH : gBias.h4 == BIAS_BEARISH;
-   bool h1Confirm     = bullish ? gBias.h1 == BIAS_BULLISH : gBias.h1 == BIAS_BEARISH;
-   bool dailyOpposed  = !dailyMatch && !dailyNeutral;
+   // Daily bias (NEUTRAL+H4+H1 = half credit)
+   bool dailyMatch   = (bullish ? gBias.daily == BIAS_BULLISH : gBias.daily == BIAS_BEARISH);
+   bool dailyNeutral = (gBias.daily == BIAS_NEUTRAL);
+   bool h4Confirm    = (bullish ? gBias.h4 == BIAS_BULLISH : gBias.h4 == BIAS_BEARISH);
+   bool h1Confirm    = (bullish ? gBias.h1 == BIAS_BULLISH : gBias.h1 == BIAS_BEARISH);
    if(!RequireDailyBias || dailyMatch)
       gScore.dailyBias = ScoreDailyBias;
    else if(dailyNeutral && h4Confirm && h1Confirm)
-      gScore.dailyBias = ScoreDailyBias / 2;   // half credit: NEUTRAL + H4+H1 aligned
+      gScore.dailyBias = ScoreDailyBias / 2;
    else AddFailReason("Daily Bias: " + BiasStr(gBias.daily) +
-                      (dailyOpposed ? (bullish?" (OPPOSED-BEARISH)":" (OPPOSED-BULLISH)")
-                                    : (bullish?" (need BULLISH)":" (need BEARISH)")));
+                      (bullish ? " (need BULLISH)" : " (need BEARISH)"));
 
    // Liquidity sweep
-   if(!UseLiquidityEngine || (gSweepDone && gSweepBull == bullish))
+   // AllowContinuation: give half credit when no sweep but bias is aligned
+   if(!UseLiquidityEngine || sweepPresent)
       gScore.liqSweep = ScoreLiqSweep;
+   else if(aggrMode && AllowContinuation && gBias.weekly == weeklyDir)
+      gScore.liqSweep = ScoreLiqSweep / 2;   // continuation: half credit
    else AddFailReason("Liquidity Sweep: Missing");
 
    // MSS
-   if(!UseMSSFilter || (gMSS.valid && gMSS.bullish == bullish))
+   bool mssPresent = (gMSS.valid && gMSS.bullish == bullish);
+   if(!UseMSSFilter || mssPresent)
       gScore.mss = ScoreMSS;
+   else if(aggrMode && AggrMSSOptional && sweepPresent)
+      gScore.mss = ScoreMSS / 2;   // optional in aggressive: half credit
    else AddFailReason("MSS: Not confirmed");
 
    // Displacement
-   if(!UseDispFilter || (gDisp.valid && gDisp.bullish == bullish))
+   bool dispPresent = (gDisp.valid && gDisp.bullish == bullish);
+   if(!UseDispFilter || dispPresent)
       gScore.displacement = ScoreDisplacement;
+   else if(aggrMode && AggrDispOptional)
+      {} // optional — 0 pts, no fail
    else AddFailReason("Displacement: Not confirmed");
 
    // FVG
    double fTop, fBot, fCE;
    bool inFVG = PriceInFVG(bullish, fTop, fBot, fCE);
-   if(!UseFVGFilter || inFVG)
+   bool fvgRequired = UseFVGFilter && !(aggrMode && !AggrRequireFVG);
+   if(!fvgRequired || inFVG)
       gScore.fvg = ScoreFVG;
-   else AddFailReason("FVG: Price not in FVG");
+   else AddFailReason("FVG: Price not in any FVG");
 
-   // Killzone
+   // Killzone — soft score; hard block handled in ValidateSetup
    if(!UseSessionFilter || InKillzone())
       gScore.killzone = ScoreKillzone;
+   else if(aggrMode && !AggrStrictKillzone)
+      {} // outside KZ but not blocking in aggressive — 0 pts, no fail
    else AddFailReason("Killzone: Outside session");
 
    // SMT
@@ -1745,17 +1833,21 @@ void CalcConfluenceScore(bool bullish)
       gScore.smt = ScoreSMT;
 
    // ADR
-   if(!UseADRFilter || !gADR.blocked)
+   double adrCap = aggrMode ? AggrADRMaxPct : ADRMaxPct;
+   bool adrBlocked = UseADRFilter && (gADR.completionPct >= adrCap);
+   if(!adrBlocked)
       gScore.adrScore = ScoreADR;
-   else AddFailReason("ADR: " + DoubleToString(gADR.completionPct * 100, 0) + "% complete");
+   else AddFailReason("ADR: " + DoubleToString(gADR.completionPct * 100, 0) + "% >= " +
+                      DoubleToString(adrCap * 100, 0) + "%");
 
    // Power of 3
    if(!UsePO3Filter || (gPO3.valid && gPO3.bullish == bullish))
       gScore.po3 = ScorePO3;
 
    // Premium/Discount
-   bool pdPass = bullish ? InDiscount() : InPremium();
-   if(!UsePremDiscFilter || pdPass)
+   bool pdPass     = bullish ? InDiscount() : InPremium();
+   bool pdRequired = UsePremDiscFilter && !(aggrMode && !AggrStrictPremDisc);
+   if(!pdRequired || pdPass)
       gScore.premDisc = ScorePremDisc;
    else AddFailReason("P/D: Not in " + (bullish ? "Discount" : "Premium"));
 
@@ -1901,23 +1993,32 @@ bool CanTrade()
 
 bool ValidateSetup(bool bullish)
 {
-   // Hard block: session/killzone must be active when filter is on
+   bool aggrMode = AggressiveMode || ScalperMode;
+
+   // Killzone hard block — skipped in aggressive mode unless AggrStrictKillzone
    if(UseSessionFilter && !InKillzone())
    {
-      AddFailReason("Killzone: Outside session");
-      return false;
+      if(!aggrMode || AggrStrictKillzone)
+      {
+         AddFailReason("Killzone: Outside session");
+         return false;
+      }
    }
 
    CalcConfluenceScore(bullish);
    gCurGrade = CalcGrade(gScore.total);
 
-   if(UseScoringSystem && gScore.total < MinScore)
+   int minScoreNow = ScalperMode ? ScalperMinScore :
+                     (AggressiveMode ? AggrMinScore : MinScore);
+
+   if(UseScoringSystem && gScore.total < minScoreNow)
    {
-      AddFailReason("Score: " + IntegerToString(gScore.total) + " < " + IntegerToString(MinScore));
+      AddFailReason("Score: " + IntegerToString(gScore.total) + " < " + IntegerToString(minScoreNow));
       return false;
    }
 
-   if(!GradeAllowed(gCurGrade))
+   // Grade check skipped in aggressive/scalper mode
+   if(!aggrMode && !GradeAllowed(gCurGrade))
    {
       AddFailReason("Grade: " + GradeStr(gCurGrade) + " below minimum");
       return false;
@@ -1935,7 +2036,11 @@ bool ValidateSetup(bool bullish)
       return false;
    }
 
-   // Score threshold is the gate — fail reasons are for panel display only
+   if(DebugLogs)
+      Print(StringFormat("SETUP VALID [%s] Score=%d/%d Grade=%s Aggr=%s",
+            bullish?"LONG":"SHORT", gScore.total, minScoreNow,
+            GradeStr(gCurGrade), aggrMode?"YES":"NO"));
+
    return true;
 }
 
@@ -2030,6 +2135,8 @@ void PlaceTrade(bool bullish)
    gMSS.valid = false;
    gDisp.valid = false;
    gSetupReady = false;
+   gSweptPDH=false; gSweptPDL=false; gSweptPWH=false; gSweptPWL=false;
+   gSweptAsianH=false; gSweptAsianL=false; gSweptEQH=false; gSweptEQL=false;
 
    Print(StringFormat("ATLAS ENTRY: %s | %s | Lot=%.2f | SL=%.5f | TP1=%.5f | TP2=%.5f | Score=%d | Grade=%s",
          bullish ? "BUY" : "SELL", _Symbol, lot, slPrice, tp1, tp2, gScore.total, GradeStr(gCurGrade)));
@@ -2462,6 +2569,23 @@ void UpdatePanel()
      LabelSet("ATLASP_L2L", "Sweep Done  :", x, RowY(r), COL_TXT, 8);
      LabelSet("ATLASP_L2V", gSweepDone?(gSweepBull?"BULL SWEEP":"BEAR SWEEP"):"NONE",
               vx, RowY(r++), gSweepDone?COL_GREEN:COL_FAIL, 8);
+     // Per-type sweep diagnostics
+     LabelSet("ATLASP_SW_PDH",  "  PDH sweep :", x, RowY(r), COL_TXT, 7);
+     LabelSet("ATLASP_SW_PDHV", gSweptPDH ? "HIT" : "-", vx, RowY(r++), gSweptPDH?COL_GREEN:COL_TXT, 7);
+     LabelSet("ATLASP_SW_PDL",  "  PDL sweep :", x, RowY(r), COL_TXT, 7);
+     LabelSet("ATLASP_SW_PDLV", gSweptPDL ? "HIT" : "-", vx, RowY(r++), gSweptPDL?COL_GREEN:COL_TXT, 7);
+     LabelSet("ATLASP_SW_PWH",  "  PWH sweep :", x, RowY(r), COL_TXT, 7);
+     LabelSet("ATLASP_SW_PWHV", gSweptPWH ? "HIT" : "-", vx, RowY(r++), gSweptPWH?COL_GREEN:COL_TXT, 7);
+     LabelSet("ATLASP_SW_PWL",  "  PWL sweep :", x, RowY(r), COL_TXT, 7);
+     LabelSet("ATLASP_SW_PWLV", gSweptPWL ? "HIT" : "-", vx, RowY(r++), gSweptPWL?COL_GREEN:COL_TXT, 7);
+     LabelSet("ATLASP_SW_ASH",  "  Asian H   :", x, RowY(r), COL_TXT, 7);
+     LabelSet("ATLASP_SW_ASHV", gSweptAsianH ? "HIT" : "-", vx, RowY(r++), gSweptAsianH?COL_GREEN:COL_TXT, 7);
+     LabelSet("ATLASP_SW_ASL",  "  Asian L   :", x, RowY(r), COL_TXT, 7);
+     LabelSet("ATLASP_SW_ASLV", gSweptAsianL ? "HIT" : "-", vx, RowY(r++), gSweptAsianL?COL_GREEN:COL_TXT, 7);
+     LabelSet("ATLASP_SW_EQH",  "  EQH sweep :", x, RowY(r), COL_TXT, 7);
+     LabelSet("ATLASP_SW_EQHV", gSweptEQH ? "HIT" : "-", vx, RowY(r++), gSweptEQH?COL_GREEN:COL_TXT, 7);
+     LabelSet("ATLASP_SW_EQL",  "  EQL sweep :", x, RowY(r), COL_TXT, 7);
+     LabelSet("ATLASP_SW_EQLV", gSweptEQL ? "HIT" : "-", vx, RowY(r++), gSweptEQL?COL_GREEN:COL_TXT, 7);
      if(gSecSweep) row = r;
    }
 
@@ -2822,6 +2946,8 @@ void OnTick()
       gSweepDone = false;
       gMSS.valid = false;
       gDisp.valid = false;
+      gSweptPDH=false; gSweptPDL=false; gSweptPWH=false; gSweptPWL=false;
+      gSweptAsianH=false; gSweptAsianL=false; gSweptEQH=false; gSweptEQL=false;
    }
 
    // Check new W1 bar
@@ -2835,6 +2961,8 @@ void OnTick()
       gSweepDone = false;
       gMSS.valid = false;
       gDisp.valid = false;
+      gSweptPDH=false; gSweptPDL=false; gSweptPWH=false; gSweptPWL=false;
+      gSweptAsianH=false; gSweptAsianL=false; gSweptEQH=false; gSweptEQL=false;
       gPO3 = SPO3State();
       gStats.peakEquity = MathMax(gStats.peakEquity, AccountInfoDouble(ACCOUNT_EQUITY));
    }
