@@ -1,0 +1,227 @@
+; ICT ATLAS EA V1.0 — AGGRESSIVE PRESET
+; Style: High-Frequency ICT — 15-30 trades/day target
+; Target: More entries while keeping ICT framework intact
+; Suitable for: $50-$500 accounts, 0.5% risk per trade
+; WARNING: Higher trade frequency = higher risk of over-trading.
+;          Always monitor drawdown. Max daily loss protection is active.
+
+; === SYMBOL PRESET ===
+SymPreset=1
+
+; === [01] BIAS ENGINE ===
+UseBiasEngine=true
+RequireWeeklyBias=true
+RequireDailyBias=true
+RequireH4Bias=false
+BiasSwingLookback=5
+
+; === [02] LIQUIDITY ENGINE ===
+UseLiquidityEngine=true
+UseEQHEQL=true
+EQHTolerance=5.0
+LiqLookbackBars=50
+SweepWickMinPips=2
+
+; === [03] MARKET STRUCTURE ===
+UseMSSFilter=true
+UseBOSFilter=false
+MSSwingLookback=3
+MSSLookbackBars=30
+
+; === [04] DISPLACEMENT ENGINE ===
+UseDispFilter=true
+DispMinBodyPct=0.60
+DispMinATRMulti=1.30
+DispLookbackBars=5
+
+; === [05] FVG ENGINE ===
+UseFVGFilter=true
+UseFVGEntry=true
+UseIFVG=true
+UseCEentry=true
+FVGMaxAgeBars=50
+MaxFVGsTracked=20
+UseFVGM5=false
+
+; === [06] PD ARRAY ENGINE ===
+UsePDAEngine=true
+PDA_UseFVG=true
+PDA_UseIFVG=true
+PDA_UseOB=true
+PDA_UseBreaker=true
+PDA_UseMitigation=false
+PDA_UseLiqVoid=false
+PDA_UseNDOG=false
+PDA_UseNWOG=false
+OBLookbackBars=10
+MaxPDAsTracked=15
+
+; === [07] PREMIUM/DISCOUNT ===
+UsePremDiscFilter=true
+DiscountZone=0.50
+PremiumZone=0.50
+DealingRangeLookback=60
+
+; === [08] SESSION & KILLZONE ===
+UseSessionFilter=true
+BrokerGMTOffset=0
+AutoGMTOffset=true
+SessionAsian=false
+SessionLondon=true
+SessionNewYork=true
+SessionNYPM=false
+AsianStartHour=0
+AsianEndHour=7
+LondonStartHour=7
+LondonEndHour=10
+NYStartHour=13
+NYEndHour=16
+NYPMStartHour=18
+NYPMEndHour=20
+
+; === [09] POWER OF 3 ===
+UsePO3Filter=false
+PO3ManipMinPips=10.0
+
+; === [10] SMT DIVERGENCE ===
+UseSMTFilter=false
+SMTSymbol=XAGUSD
+SMTLookbackBars=5
+
+; === [11] ADR FILTER ===
+UseADRFilter=true
+ADRPeriod=14
+ADRMaxPct=0.80
+
+; === [12] NEWS FILTER ===
+UseNewsFilter=true
+NewsBlockBefore=30
+NewsBlockAfter=30
+NewsTime1=
+NewsTime2=
+NewsTime3=
+NewsTime4=
+NewsTime5=
+NewsTime6=
+NewsTime7=
+NewsTime8=
+
+; === [13] MARKET CONDITION ===
+UseConditionFilter=true
+TradeInTrend=true
+TradeInRanging=true
+TradeInChoppy=false
+CondADXPeriod=14
+CondADXTrend=25.0
+CondADXChoppy=18.0
+
+; === [15-16] SPREAD & SLIPPAGE ===
+MaxSpreadPips=50
+MaxSlippagePips=5
+
+; === [17] CORRELATION FILTER ===
+UseCorrelFilter=false
+CorrelSymbol=DXY
+
+; === [18] CONFLUENCE SCORING ===
+UseScoringSystem=true
+MinScore=80
+ScoreWeeklyBias=15
+ScoreDailyBias=15
+ScoreLiqSweep=20
+ScoreMSS=20
+ScoreDisplacement=15
+ScoreFVG=10
+ScoreKillzone=10
+ScoreSMT=5
+ScoreADR=5
+ScorePO3=5
+ScorePremDisc=5
+
+; === [19] TRADE QUALITY GRADES ===
+AllowedGrades=2
+GradeAPlus=100
+GradeA=80
+GradeB=60
+
+; === [25] RISK MANAGEMENT ===
+RiskMode=0
+RiskPercent=0.50
+FixedLotSize=0.01
+MaxLotCap=0.50
+MaxTradesPerDay=30
+MaxConsecLosses=5
+
+; === [22] ADVANCED TRADE MANAGEMENT ===
+TP1_RR=1.0
+TP2_RR=2.0
+TP3_RR=3.0
+TP1_ClosePct=40.0
+TP2_ClosePct=40.0
+UseBreakeven=true
+BreakevenBufferPips=5
+UseTrailingStop=false
+TrailStartPips=50
+TrailStepPips=15
+SLBufferPips=10
+MaxSLPips=80
+MinSLPips=15
+
+; === [23] DAILY PROFIT LOCK ===
+UseProfitLock=true
+ProfitLock_ReduceR=5.0
+ProfitLock_StopR=8.0
+ProfitLock_ReducePct=50.0
+
+; === [24] DAILY LOSS PROTECTION ===
+UseLossProtect=true
+LossProtect_ReduceR=3.0
+LossProtect_StopR=5.0
+MaxWeeklyLossR=10.0
+
+; === TRADE CLOSE RULES ===
+CloseOnFriday=true
+FridayCloseHour=14
+CooldownMinutes=5
+
+; === [26] VISUAL ===
+DrawPDH_PDL=true
+DrawPWH_PWL=true
+DrawSessionRanges=true
+DrawFVGZones=true
+DrawOBZones=true
+DrawLiqSweeps=true
+DrawMSSLines=true
+DrawTargets=true
+
+; === [27] DEBUG PANEL ===
+ShowPanel=true
+PanelX=12
+PanelY=30
+ShowStatPanel=true
+
+; === [28] DEBUG & RELAXED MODE ===
+DebugLogs=false
+UseRelaxedMode=false
+RelaxedMinScore=50
+RelaxedMSSOptional=true
+RelaxedDispOptional=true
+RelaxedDailyOptional=true
+RelaxedWeeklyOptional=false
+AllowFVGOnlyEntry=false
+AllowOBEntry=false
+ExpandKillzones=true
+
+; === [29] AGGRESSIVE MODE — KEY SETTINGS ===
+AggressiveMode=true
+AggrMinScore=55
+AggrMSSOptional=true
+AggrDispOptional=false
+AggrDispMinBodyPct=0.40
+AggrDispMinATRMulti=0.80
+AggrRequireFVG=false
+AggrStrictPremDisc=false
+AggrADRMaxPct=1.20
+AggrStrictKillzone=false
+ScalperMode=false
+ScalperMinScore=40

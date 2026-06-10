@@ -324,6 +324,21 @@ input bool   AllowFVGOnlyEntry    = false; // Allow Sweep+FVG entry (no MSS/Disp
 input bool   AllowOBEntry         = false; // Allow OB-only entries (no full ICT sequence)
 input bool   ExpandKillzones      = false; // Expand sessions: add Asian, extend NY to 18:00
 
+//--- AGGRESSIVE MODE (HIGH FREQUENCY) --------------------------------
+input group "══════════ [29] AGGRESSIVE MODE ══════════"
+input bool   AggressiveMode         = false; // Aggressive mode — 15-30 trades/day target
+input int    AggrMinScore           = 55;    // Min score when aggressive (conservative=80)
+input bool   AggrMSSOptional        = true;  // MSS optional in aggressive mode
+input bool   AggrDispOptional       = false; // Displacement optional in aggressive mode
+input double AggrDispMinBodyPct     = 0.40;  // Displacement body% threshold (aggressive)
+input double AggrDispMinATRMulti    = 0.80;  // Displacement ATR multiplier (aggressive)
+input bool   AggrRequireFVG         = false; // Require FVG to enter in aggressive mode
+input bool   AggrStrictPremDisc     = false; // Strict Premium/Discount in aggressive mode
+input double AggrADRMaxPct          = 1.20;  // ADR max completion% in aggressive mode
+input bool   AggrStrictKillzone     = false; // Hard-block outside killzone in aggressive mode
+input bool   ScalperMode            = false; // Scalper mode — maximum frequency, MinScore=40
+input int    ScalperMinScore        = 40;    // Min score in scalper mode
+
 //===================================================================
 // SECTION 3 — DATA STRUCTURES
 //===================================================================
@@ -597,6 +612,10 @@ double        gEffMinSL    = 8.0;
 // News times cache
 datetime      gNewsTimes[8];
 int           gNewsCount = 0;
+
+// Daily signal counters (reset each day)
+int           gDailyChecked   = 0;   // setups evaluated (per bar, once per M15 bar)
+int           gDailyRejected  = 0;   // setups rejected by filters
 
 //===================================================================
 // SECTION 5 — UTILITY FUNCTIONS
@@ -1727,6 +1746,30 @@ bool ConditionAllowsTrade()
 // SECTION 19 — [14] CONFLUENCE SCORING + [15] GRADE ENGINE
 //===================================================================
 
+// Re-check displacement with given body/ATR thresholds (for aggressive mode scoring)
+bool CheckDispWithThresholds(bool bullish, double minBody, double minATR)
+{
+   if(!gSweepDone || gSweepBull != bullish) return false;
+   double atr = GetATRMain(1);
+   if(atr <= 0) return false;
+   for(int i = 1; i <= DispLookbackBars; i++)
+   {
+      double o = iOpen (_Symbol, PERIOD_M15, i);
+      double c = iClose(_Symbol, PERIOD_M15, i);
+      double h = iHigh (_Symbol, PERIOD_M15, i);
+      double l = iLow  (_Symbol, PERIOD_M15, i);
+      double range = h - l;
+      double body  = MathAbs(c - o);
+      if(range <= 0) continue;
+      if(body / range < minBody) continue;
+      if(range / atr  < minATR)  continue;
+      bool isBullDisp = (c > o) && bullish;
+      bool isBearDisp = (c < o) && !bullish;
+      if(isBullDisp || isBearDisp) return true;
+   }
+   return false;
+}
+
 void CalcConfluenceScore(bool bullish)
 {
    gScore.weeklyBias    = 0;
@@ -1743,11 +1786,12 @@ void CalcConfluenceScore(bool bullish)
    gScore.total         = 0;
    gScore.failCount     = 0;
 
-   // In relaxed mode some filters become optional
-   bool relaxMSS    = UseRelaxedMode && RelaxedMSSOptional;
-   bool relaxDisp   = UseRelaxedMode && RelaxedDispOptional;
-   bool relaxDaily  = UseRelaxedMode && RelaxedDailyOptional;
-   bool relaxWeekly = UseRelaxedMode && RelaxedWeeklyOptional;
+   // Mode flags (priority: Scalper > Aggressive > Relaxed > Normal)
+   bool aggrMode   = AggressiveMode || ScalperMode;
+   bool relaxMSS   = (UseRelaxedMode && RelaxedMSSOptional)  || (aggrMode && AggrMSSOptional);
+   bool relaxDisp  = (UseRelaxedMode && RelaxedDispOptional) || (aggrMode && AggrDispOptional);
+   bool relaxDaily = (UseRelaxedMode && RelaxedDailyOptional);
+   bool relaxWeekly= (UseRelaxedMode && RelaxedWeeklyOptional);
    // AllowFVGOnlyEntry: enter with sweep+FVG alone
    bool fvgOnly = AllowFVGOnlyEntry && gSweepDone && gSweepBull == bullish;
 
@@ -1758,14 +1802,14 @@ void CalcConfluenceScore(bool bullish)
    else AddFailReason("Weekly Bias: " + BiasStr(gBias.weekly) +
                       (bullish ? " (need BULLISH)" : " (need BEARISH)"));
 
-   // Daily bias — H4-only override for NEUTRAL days (H1 no longer required):
+   // Daily bias — H4-only override for NEUTRAL days:
    //   Full score  : Daily direction matches
    //   Half score  : Daily is NEUTRAL but H4 confirms direction
    //   Zero + fail : Daily actively opposes direction
-   bool dailyMatch    = bullish ? gBias.daily == BIAS_BULLISH : gBias.daily == BIAS_BEARISH;
-   bool dailyNeutral  = (gBias.daily == BIAS_NEUTRAL);
-   bool h4Confirm     = bullish ? gBias.h4 == BIAS_BULLISH : gBias.h4 == BIAS_BEARISH;
-   bool dailyOpposed  = !dailyMatch && !dailyNeutral;
+   bool dailyMatch   = bullish ? gBias.daily == BIAS_BULLISH : gBias.daily == BIAS_BEARISH;
+   bool dailyNeutral = (gBias.daily == BIAS_NEUTRAL);
+   bool h4Confirm    = bullish ? gBias.h4 == BIAS_BULLISH   : gBias.h4 == BIAS_BEARISH;
+   bool dailyOpposed = !dailyMatch && !dailyNeutral;
    if(!RequireDailyBias || relaxDaily || dailyMatch)
       gScore.dailyBias = ScoreDailyBias;
    else if(dailyNeutral && h4Confirm)
@@ -1785,41 +1829,51 @@ void CalcConfluenceScore(bool bullish)
       gScore.mss = ScoreMSS;
    else AddFailReason("MSS: Not confirmed");
 
-   // Displacement
-   if(!UseDispFilter || relaxDisp || fvgOnly ||
-      (gDisp.valid && gDisp.bullish == bullish))
+   // Displacement — aggressive mode uses lower thresholds for detection
+   bool dispOk = (gDisp.valid && gDisp.bullish == bullish);
+   if(!dispOk && aggrMode)
+      dispOk = CheckDispWithThresholds(bullish, AggrDispMinBodyPct, AggrDispMinATRMulti);
+   if(!UseDispFilter || relaxDisp || fvgOnly || dispOk)
       gScore.displacement = ScoreDisplacement;
    else AddFailReason("Displacement: Not confirmed");
 
-   // FVG
+   // FVG — in aggressive mode, not required
    double fTop, fBot, fCE;
    bool inFVG = PriceInFVG(bullish, fTop, fBot, fCE);
-   if(!UseFVGFilter || inFVG)
+   bool fvgRequired = UseFVGFilter && !(aggrMode && !AggrRequireFVG);
+   if(!fvgRequired || inFVG)
       gScore.fvg = ScoreFVG;
    else AddFailReason("FVG: Price not in FVG");
 
-   // Killzone / expanded killzone
+   // Killzone — in aggressive mode with !AggrStrictKillzone, give 0 score but no hard-fail
    bool inKZ = ExpandKillzones ? InExpandedKillzone() : InKillzone();
    if(!UseSessionFilter || inKZ)
       gScore.killzone = ScoreKillzone;
-   else AddFailReason("Killzone: Outside session");
+   else if(aggrMode && !AggrStrictKillzone)
+      gScore.killzone = 0;  // penalty: 0 pts outside session — but not a disqualifier
+   else
+      AddFailReason("Killzone: Outside session");
 
    // SMT
    if(!UseSMTFilter || (gSMT.valid && (bullish ? gSMT.bullishDivergence : gSMT.bearishDivergence)))
       gScore.smt = ScoreSMT;
 
-   // ADR
-   if(!UseADRFilter || !gADR.blocked)
+   // ADR — aggressive mode uses higher threshold
+   double adrLimit = (aggrMode ? AggrADRMaxPct : ADRMaxPct);
+   bool adrOk = !UseADRFilter || (gADR.completionPct < adrLimit);
+   if(adrOk)
       gScore.adrScore = ScoreADR;
-   else AddFailReason("ADR: " + DoubleToString(gADR.completionPct * 100, 0) + "% complete");
+   else AddFailReason("ADR: " + DoubleToString(gADR.completionPct * 100, 0) + "% complete (lim=" +
+                      DoubleToString(adrLimit * 100, 0) + "%)");
 
    // Power of 3
    if(!UsePO3Filter || (gPO3.valid && gPO3.bullish == bullish))
       gScore.po3 = ScorePO3;
 
-   // Premium/Discount
+   // Premium/Discount — in aggressive mode, not required
    bool pdPass = bullish ? InDiscount() : InPremium();
-   if(!UsePremDiscFilter || pdPass)
+   bool pdRequired = UsePremDiscFilter && !(aggrMode && !AggrStrictPremDisc);
+   if(!pdRequired || pdPass)
       gScore.premDisc = ScorePremDisc;
    else AddFailReason("P/D: Not in " + (bullish ? "Discount" : "Premium"));
 
@@ -1829,12 +1883,15 @@ void CalcConfluenceScore(bool bullish)
                   gScore.po3 + gScore.premDisc;
 
    if(DebugLogs)
-      Print("SCORE ",bullish?"BULL":"BEAR"," = ",gScore.total,"/",
+   {
+      string mode = ScalperMode?"SCALPER":AggressiveMode?"AGGR":UseRelaxedMode?"RELAXED":"NORMAL";
+      Print("SCORE[",mode,"] ",bullish?"BULL":"BEAR"," = ",gScore.total,"/",
             ScoreWeeklyBias+ScoreDailyBias+ScoreLiqSweep+ScoreMSS+ScoreDisplacement+
             ScoreFVG+ScoreKillzone+ScoreSMT+ScoreADR+ScorePO3+ScorePremDisc,
             "  [W:",gScore.weeklyBias," D:",gScore.dailyBias," Liq:",gScore.liqSweep,
             " MSS:",gScore.mss," Disp:",gScore.displacement," FVG:",gScore.fvg,
             " KZ:",gScore.killzone," ADR:",gScore.adrScore," PD:",gScore.premDisc,"]");
+   }
 }
 
 ENUM_ATLAS_GRADE CalcGrade(int score)
@@ -1893,6 +1950,8 @@ void UpdateRiskState()
       gRisk.riskReduced        = false;
       gRisk.effectiveRiskPct   = RiskPercent;
       gRisk.stopReason         = "";
+      gDailyChecked            = 0;
+      gDailyRejected           = 0;
    }
 
    double balance  = AccountInfoDouble(ACCOUNT_BALANCE);
@@ -1977,38 +2036,57 @@ bool ValidateSetup(bool bullish)
    CalcConfluenceScore(bullish);
    gCurGrade = CalcGrade(gScore.total);
 
+   bool aggrMode = AggressiveMode || ScalperMode;
+
    // Hard block: session/killzone
+   // In aggressive mode with AggrStrictKillzone=false, outside-session is allowed (score penalty only)
    bool inKZ = ExpandKillzones ? InExpandedKillzone() : InKillzone();
-   if(UseSessionFilter && !inKZ)
+   if(UseSessionFilter && !inKZ && !(aggrMode && !AggrStrictKillzone))
    {
       AddFailReason("Killzone: Outside session");
+      if(DebugLogs) Print("REJECTED[",bullish?"BULL":"BEAR","]: Killzone — outside session window");
       return false;
    }
 
-   int effectiveMinScore = UseRelaxedMode ? RelaxedMinScore : MinScore;
+   // Determine effective minimum score
+   int effectiveMinScore;
+   if(ScalperMode)         effectiveMinScore = ScalperMinScore;
+   else if(AggressiveMode) effectiveMinScore = AggrMinScore;
+   else if(UseRelaxedMode) effectiveMinScore = RelaxedMinScore;
+   else                    effectiveMinScore = MinScore;
+
    if(UseScoringSystem && gScore.total < effectiveMinScore)
    {
-      AddFailReason("Score: " + IntegerToString(gScore.total) + " < " +
-                    IntegerToString(effectiveMinScore) +
-                    (UseRelaxedMode ? " (RELAXED)" : ""));
+      AddFailReason("Score: " + IntegerToString(gScore.total) + " < " + IntegerToString(effectiveMinScore));
+      if(DebugLogs) Print("REJECTED[",bullish?"BULL":"BEAR","]: Score ",gScore.total," < ",effectiveMinScore,
+                          " — fails: ", gScore.failCount > 0 ? gScore.failReasons[0] : "n/a");
       return false;
    }
 
-   if(!UseRelaxedMode && !GradeAllowed(gCurGrade))
+   // Grade check: aggressive/scalper mode allows Grade B, relaxed allows all
+   bool gradeOk;
+   if(aggrMode)          gradeOk = (gCurGrade <= GRADE_B);
+   else if(UseRelaxedMode) gradeOk = true;
+   else                  gradeOk = GradeAllowed(gCurGrade);
+
+   if(!gradeOk)
    {
       AddFailReason("Grade: " + GradeStr(gCurGrade) + " below minimum");
+      if(DebugLogs) Print("REJECTED[",bullish?"BULL":"BEAR","]: Grade ",GradeStr(gCurGrade)," below minimum allowed");
       return false;
    }
 
    if(UseConditionFilter && !ConditionAllowsTrade())
    {
       AddFailReason("Market Condition: " + EnumToString(gCond.condition));
+      if(DebugLogs) Print("REJECTED[",bullish?"BULL":"BEAR","]: Market condition — ",EnumToString(gCond.condition));
       return false;
    }
 
    if(UseNewsFilter && IsNewsBlocked())
    {
       AddFailReason("News: Blocked");
+      if(DebugLogs) Print("REJECTED[",bullish?"BULL":"BEAR","]: News event blocking");
       return false;
    }
 
@@ -2465,8 +2543,9 @@ void UpdatePanel()
    // Creator + symbol (always first content rows, compact, no spacer after)
    LabelSet("ATLASP_CR1", "  Created by: RATTANA CHHORM",
             x, RowY(row++), C'220,220,220', 10);
-   LabelSet("ATLASP_CR2", "  " + _Symbol + "  |  " + EnumToString(_Period) +
-            (UseRelaxedMode ? "  [RELAXED]" : ""),
+   string modeTag = ScalperMode ? "  [SCALPER]" : AggressiveMode ? "  [AGGRESSIVE]" :
+                    UseRelaxedMode ? "  [RELAXED]" : "";
+   LabelSet("ATLASP_CR2", "  " + _Symbol + "  |  " + EnumToString(_Period) + modeTag,
             x, RowY(row++), C'180,180,180', 9);
 
    // === BIAS ENGINE ===
@@ -2586,6 +2665,46 @@ void UpdatePanel()
             " PD:"+IntegerToString(gScore.premDisc),
             x, RowY(row++), C'140,140,180', 7);
 
+   // === FILTER STATUS — PASS/FAIL per filter ===
+   LabelSet("ATLASP_FS0", "--- FILTER STATUS ---", x, RowY(row++), COL_BLUE, 7);
+
+   // Determine which direction to show status for
+   bool fsDir = gSetupBull;
+   bool fsW = (gScore.weeklyBias > 0);
+   bool fsD = (gScore.dailyBias  > 0);
+   bool fsL = (gScore.liqSweep   > 0);
+   bool fsM = (gScore.mss        > 0);
+   bool fsX = (gScore.displacement > 0);
+   bool fsF = (gScore.fvg        > 0);
+   bool fsK = (gScore.killzone   > 0);
+   bool fsA = (gScore.adrScore   > 0);
+   bool fsP = (gScore.premDisc   > 0);
+   bool fsC = ConditionAllowsTrade();
+   bool fsN = !IsNewsBlocked();
+
+   LabelSet("ATLASP_FSW","  Weekly Bias  :", x, RowY(row), COL_TXT, 7);
+   LabelSet("ATLASP_FSWV", PassFail(fsW), vx, RowY(row++), PFColor(fsW), 7);
+   LabelSet("ATLASP_FSD","  Daily Bias   :", x, RowY(row), COL_TXT, 7);
+   LabelSet("ATLASP_FSDV", PassFail(fsD), vx, RowY(row++), PFColor(fsD), 7);
+   LabelSet("ATLASP_FSL","  Liq Sweep    :", x, RowY(row), COL_TXT, 7);
+   LabelSet("ATLASP_FSLV", PassFail(fsL), vx, RowY(row++), PFColor(fsL), 7);
+   LabelSet("ATLASP_FSM","  MSS          :", x, RowY(row), COL_TXT, 7);
+   LabelSet("ATLASP_FSMV", PassFail(fsM), vx, RowY(row++), PFColor(fsM), 7);
+   LabelSet("ATLASP_FSX","  Displacement :", x, RowY(row), COL_TXT, 7);
+   LabelSet("ATLASP_FSXV", PassFail(fsX), vx, RowY(row++), PFColor(fsX), 7);
+   LabelSet("ATLASP_FSF","  FVG Entry    :", x, RowY(row), COL_TXT, 7);
+   LabelSet("ATLASP_FSFV", PassFail(fsF), vx, RowY(row++), PFColor(fsF), 7);
+   LabelSet("ATLASP_FSK","  Session/KZ   :", x, RowY(row), COL_TXT, 7);
+   LabelSet("ATLASP_FSKV", PassFail(fsK), vx, RowY(row++), PFColor(fsK), 7);
+   LabelSet("ATLASP_FSA","  ADR Filter   :", x, RowY(row), COL_TXT, 7);
+   LabelSet("ATLASP_FSAV", PassFail(fsA), vx, RowY(row++), PFColor(fsA), 7);
+   LabelSet("ATLASP_FSP","  P/D Zone     :", x, RowY(row), COL_TXT, 7);
+   LabelSet("ATLASP_FSPV", PassFail(fsP), vx, RowY(row++), PFColor(fsP), 7);
+   LabelSet("ATLASP_FSC","  Mkt Cond     :", x, RowY(row), COL_TXT, 7);
+   LabelSet("ATLASP_FSCV", PassFail(fsC), vx, RowY(row++), PFColor(fsC), 7);
+   LabelSet("ATLASP_FSN","  News         :", x, RowY(row), COL_TXT, 7);
+   LabelSet("ATLASP_FSNV", PassFail(fsN), vx, RowY(row++), PFColor(fsN), 7);
+
    // === FINAL DECISION ===
    LabelSet("ATLASP_D0", "--- FINAL DECISION ---",  x, RowY(row++), COL_BLUE, 7);
    color dclr = gSetupReady ? COL_GREEN : COL_RED;
@@ -2604,6 +2723,11 @@ void UpdatePanel()
    LabelSet("ATLASP_R2L", "Trades Today:", x, RowY(row), COL_TXT, 8);
    LabelSet("ATLASP_R2V", IntegerToString(gRisk.dailyTrades)+"/"+IntegerToString(MaxTradesPerDay),
             vx, RowY(row++), COL_GOLD, 8);
+   LabelSet("ATLASP_R5L", "Signals     :", x, RowY(row), COL_TXT, 8);
+   LabelSet("ATLASP_R5V", IntegerToString(gDailyChecked)+" chk / "+
+            IntegerToString(gDailyRejected)+" rej / "+
+            IntegerToString(gRisk.dailyTrades)+" exec",
+            vx, RowY(row++), COL_BLUE, 8);
    LabelSet("ATLASP_R3L", "Trading     :", x, RowY(row), COL_TXT, 8);
    LabelSet("ATLASP_R3V", gRisk.tradingAllowed?"ALLOWED":"STOPPED: "+gRisk.stopReason,
             vx, RowY(row++), gRisk.tradingAllowed?COL_GREEN:COL_RED, 8);
@@ -2717,6 +2841,11 @@ void CheckForEntry()
    if(!CanTrade()) return;
    if(!gRisk.tradingAllowed) return;
 
+   // Per-bar counter guard: only count once per M15 bar
+   static datetime lastCountedBar = 0;
+   datetime curBar = iTime(_Symbol, PERIOD_M15, 0);
+   bool isNewBarEval = (curBar != lastCountedBar);
+
    // Determine the primary direction from HTF bias so the panel always
    // shows the most relevant score/fail reasons even when no trade fires.
    ENUM_ATLAS_BIAS combinedBias;
@@ -2737,6 +2866,7 @@ void CheckForEntry()
 
    if(okPrimary)
    {
+      if(isNewBarEval) { gDailyChecked++; lastCountedBar = curBar; }
       gSetupReady = true;
       gSetupBull  = preferBull;
       gCurGrade   = primaryGrade;
@@ -2750,6 +2880,7 @@ void CheckForEntry()
 
    if(okSecond)
    {
+      if(isNewBarEval) { gDailyChecked++; lastCountedBar = curBar; }
       gSetupReady = true;
       gSetupBull  = !preferBull;
       gCurGrade   = CalcGrade(gScore.total);
@@ -2759,8 +2890,9 @@ void CheckForEntry()
 
    // No trade — restore primary-direction score so the panel shows
    // WHY the bias-aligned direction was rejected (not the opposite one).
-   gScore     = primaryScore;
-   gCurGrade  = primaryGrade;
+   if(isNewBarEval) { gDailyRejected++; lastCountedBar = curBar; }
+   gScore      = primaryScore;
+   gCurGrade   = primaryGrade;
    gSetupReady = false;
 }
 
