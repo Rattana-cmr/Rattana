@@ -450,6 +450,12 @@ SECTIONS = [
         ("MinSLPips", "Minimum required SL size in pips",
          "15", "15", "15", "15",
          "Rejects setups with SL tighter than 15 pips"),
+        ("UseLocalSwingSL", "Use local swing high/low for SL instead of PDH/PDL",
+         "true", "true", "true", "true",
+         "true = SL placed at nearest swing (5-40 pips). false = SL at PDH/PDL (100-200 pips). Keep true."),
+        ("SwingLookback", "Number of bars back to find local swing high/low for SL",
+         "5", "5", "5", "5",
+         "5 bars = ~1.25 hours on M15. Increase to 8-10 for wider SL in volatile markets."),
     ]),
     ("  [23] DAILY PROFIT LOCK", [
         ("UseProfitLock", "Enable automatic profit protection for the day",
@@ -600,6 +606,12 @@ SECTIONS = [
         ("ScalperMinScore", "Minimum score when ScalperMode=true",
          "40", "40", "40", "40",
          "Only active when ScalperMode=true; very low threshold"),
+        ("AggrMaxSLPips", "Maximum allowed SL size in pips when AggressiveMode=true",
+         "200", "200", "150", "200",
+         "Replaces MaxSLPips cap in aggressive mode. 200 pips allows wide SL from PDH/PDL if UseLocalSwingSL=false."),
+        ("AggrAllowGradeB", "Allow Grade B trades (score 60-79) in aggressive mode",
+         "true", "true", "true", "true",
+         "Increases trade frequency. Grade B = valid ICT setup, just fewer confluences than A/A+."),
     ]),
 ]
 
