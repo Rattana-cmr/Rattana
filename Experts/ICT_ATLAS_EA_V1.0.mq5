@@ -646,7 +646,7 @@ void ApplySymbolPreset()
    }
    switch(p)
    {
-      case SYM_XAUUSD: gEffMaxSL = 50; gEffMinSL = 8;  break;
+      case SYM_XAUUSD: gEffMaxSL = MathMax(120.0, (double)MaxSLPips); gEffMinSL = 8;  break;
       case SYM_EURUSD: gEffMaxSL = 30; gEffMinSL = 5;  break;
       case SYM_GBPUSD: gEffMaxSL = 35; gEffMinSL = 5;  break;
       case SYM_USDJPY: gEffMaxSL = 30; gEffMinSL = 5;  break;
@@ -1818,23 +1818,30 @@ void CalcConfluenceScore(bool bullish)
                       (dailyOpposed ? (bullish?" (OPPOSED-BEARISH)":" (OPPOSED-BULLISH)")
                                     : (bullish?" (need BULLISH)":" (need BEARISH)")));
 
-   // Liquidity sweep
-   if(!UseLiquidityEngine || (gSweepDone && gSweepBull == bullish))
+   // Liquidity sweep — always the foundational event; no sweep = no ICT setup
+   bool sweepPresent = gSweepDone && gSweepBull == bullish;
+   if(!UseLiquidityEngine || sweepPresent)
       gScore.liqSweep = ScoreLiqSweep;
    else AddFailReason("Liquidity Sweep: Missing");
 
-   // MSS
-   if(!UseMSSFilter || relaxMSS || fvgOnly ||
-      (gMSS.valid && gMSS.bullish == bullish))
+   // MSS — relaxable in aggressive mode, but sweep MUST be present first
+   bool mssOk = sweepPresent && gMSS.valid && gMSS.bullish == bullish;
+   bool mssRelax = sweepPresent && (relaxMSS || fvgOnly);
+   if(!UseMSSFilter || mssRelax || mssOk)
       gScore.mss = ScoreMSS;
+   else if(!sweepPresent)
+      {}  // sweep already failed; don't double-add MSS fail reason
    else AddFailReason("MSS: Not confirmed");
 
-   // Displacement — aggressive mode uses lower thresholds for detection
-   bool dispOk = (gDisp.valid && gDisp.bullish == bullish);
-   if(!dispOk && aggrMode)
+   // Displacement — aggressive mode uses lower thresholds; sweep must be present
+   bool dispOk = sweepPresent && gDisp.valid && gDisp.bullish == bullish;
+   if(!dispOk && sweepPresent && aggrMode)
       dispOk = CheckDispWithThresholds(bullish, AggrDispMinBodyPct, AggrDispMinATRMulti);
-   if(!UseDispFilter || relaxDisp || fvgOnly || dispOk)
+   bool dispRelax = sweepPresent && (relaxDisp || fvgOnly);
+   if(!UseDispFilter || dispRelax || dispOk)
       gScore.displacement = ScoreDisplacement;
+   else if(!sweepPresent)
+      {}  // sweep already failed; no duplicate reason
    else AddFailReason("Displacement: Not confirmed");
 
    // FVG — in aggressive mode, not required
@@ -2038,6 +2045,10 @@ bool ValidateSetup(bool bullish)
 
    bool aggrMode = AggressiveMode || ScalperMode;
 
+   // Hard block: liquidity sweep — core ICT event, never optional
+   if(UseLiquidityEngine && !(gSweepDone && gSweepBull == bullish))
+      return false;  // fail reason already added by CalcConfluenceScore
+
    // Hard block: session/killzone
    // In aggressive mode with AggrStrictKillzone=false, outside-session is allowed (score penalty only)
    bool inKZ = ExpandKillzones ? InExpandedKillzone() : InKillzone();
@@ -2097,35 +2108,65 @@ bool ValidateSetup(bool bullish)
 // SECTION 22 — [17] TRADE ENTRY ENGINE
 //===================================================================
 
-void PlaceTrade(bool bullish)
+bool PlaceTrade(bool bullish)
 {
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   bool   aggrMode = AggressiveMode || ScalperMode;
 
-   // Calculate SL based on recent swing
+   // Calculate SL:
+   //   Aggressive/Scalper: use local 5-bar swing high/low (tight, manageable SL)
+   //   Conservative: use PDH/PDL (structural SL — wider but ICT-correct)
    double slPrice = 0;
-   if(bullish)
+   if(aggrMode)
    {
-      // SL below sweep low
-      double sweepLow = gBias.pdl;
-      for(int i = 1; i <= 10; i++)
-         sweepLow = MathMin(sweepLow, iLow(_Symbol, PERIOD_M15, i));
-      slPrice = sweepLow - Pips(SLBufferPips);
+      if(bullish)
+      {
+         double localLow = iLow(_Symbol, PERIOD_M15, 1);
+         for(int i = 2; i <= 5; i++) localLow = MathMin(localLow, iLow(_Symbol, PERIOD_M15, i));
+         slPrice = localLow - Pips(SLBufferPips);
+      }
+      else
+      {
+         double localHigh = iHigh(_Symbol, PERIOD_M15, 1);
+         for(int i = 2; i <= 5; i++) localHigh = MathMax(localHigh, iHigh(_Symbol, PERIOD_M15, i));
+         slPrice = localHigh + Pips(SLBufferPips);
+      }
    }
    else
    {
-      double sweepHigh = gBias.pdh;
-      for(int i = 1; i <= 10; i++)
-         sweepHigh = MathMax(sweepHigh, iHigh(_Symbol, PERIOD_M15, i));
-      slPrice = sweepHigh + Pips(SLBufferPips);
+      if(bullish)
+      {
+         double sweepLow = gBias.pdl;
+         for(int i = 1; i <= 10; i++) sweepLow = MathMin(sweepLow, iLow(_Symbol, PERIOD_M15, i));
+         slPrice = sweepLow - Pips(SLBufferPips);
+      }
+      else
+      {
+         double sweepHigh = gBias.pdh;
+         for(int i = 1; i <= 10; i++) sweepHigh = MathMax(sweepHigh, iHigh(_Symbol, PERIOD_M15, i));
+         slPrice = sweepHigh + Pips(SLBufferPips);
+      }
    }
 
    double entry = bullish ? ask : bid;
    double slPips = ToPips(MathAbs(entry - slPrice));
 
    // Validate SL size
-   if(slPips < gEffMinSL) { AddFailReason("SL too small: " + DoubleToString(slPips, 1) + " pips"); return; }
-   if(slPips > gEffMaxSL) { AddFailReason("SL too large: " + DoubleToString(slPips, 1) + " pips"); return; }
+   if(slPips < gEffMinSL)
+   {
+      string msg = "SL too small: " + DoubleToString(slPips, 1) + " pips (min=" + DoubleToString(gEffMinSL, 0) + ")";
+      AddFailReason(msg);
+      Print("TRADE BLOCKED[",bullish?"BULL":"BEAR","]: ", msg);
+      return false;
+   }
+   if(slPips > gEffMaxSL)
+   {
+      string msg = "SL too large: " + DoubleToString(slPips, 1) + " pips (max=" + DoubleToString(gEffMaxSL, 0) + ")";
+      AddFailReason(msg);
+      Print("TRADE BLOCKED[",bullish?"BULL":"BEAR","]: ", msg);
+      return false;
+   }
 
    double rValue = MathAbs(entry - slPrice);
    double tp1    = bullish ? entry + rValue * TP1_RR : entry - rValue * TP1_RR;
@@ -2133,7 +2174,11 @@ void PlaceTrade(bool bullish)
    double tp3    = bullish ? entry + rValue * TP3_RR : entry - rValue * TP3_RR;
 
    double lot    = CalcLotSize(slPips);
-   if(lot <= 0)  { Print("ICT ATLAS: Lot size 0 — skip"); return; }
+   if(lot <= 0)
+   {
+      Print("TRADE BLOCKED[",bullish?"BULL":"BEAR","]: Lot size 0 (balance too low or risk settings)");
+      return false;
+   }
 
    Trade.SetDeviationInPoints((ulong)(MaxSlippagePips * (int)gPipFactor));
 
@@ -2143,8 +2188,8 @@ void PlaceTrade(bool bullish)
 
    if(!ok)
    {
-      Print("ICT ATLAS: Order failed — ", Trade.ResultRetcodeDescription());
-      return;
+      Print("TRADE BLOCKED[",bullish?"BULL":"BEAR","]: Order failed — ", Trade.ResultRetcodeDescription());
+      return false;
    }
 
    ulong ticket = Trade.ResultOrder();
@@ -2169,7 +2214,8 @@ void PlaceTrade(bool bullish)
    gTrade.grade     = gCurGrade;
    gTrade.score     = gScore.total;
    gTrade.openTime  = TimeCurrent();
-   gTrade.model     = gSweepBull ? "PDL+MSS+FVG" : "PDH+MSS+FVG";
+   gTrade.model     = aggrMode ? (bullish?"AGGR-BUY":"AGGR-SELL")
+                               : (gSweepBull ? "PDL+MSS+FVG" : "PDH+MSS+FVG");
 
    // Store TP levels as position comments via GlobalVariable
    string key = "ATLAS_" + IntegerToString(ticket);
@@ -2185,8 +2231,9 @@ void PlaceTrade(bool bullish)
    gDisp.valid = false;
    gSetupReady = false;
 
-   Print(StringFormat("ATLAS ENTRY: %s | %s | Lot=%.2f | SL=%.5f | TP1=%.5f | TP2=%.5f | Score=%d | Grade=%s",
-         bullish ? "BUY" : "SELL", _Symbol, lot, slPrice, tp1, tp2, gScore.total, GradeStr(gCurGrade)));
+   Print(StringFormat("TRADE EXECUTED: %s | %s | Lot=%.2f | Entry=%.2f | SL=%.2f | TP1=%.2f | TP2=%.2f | SL=%.1fpips | Score=%d | Grade=%s",
+         bullish ? "BUY" : "SELL", _Symbol, lot, entry, slPrice, tp1, tp2, slPips, gScore.total, GradeStr(gCurGrade)));
+   return true;
 }
 
 //===================================================================
@@ -2841,13 +2888,12 @@ void CheckForEntry()
    if(!CanTrade()) return;
    if(!gRisk.tradingAllowed) return;
 
-   // Per-bar counter guard: only count once per M15 bar
+   // Per-bar guard: evaluate and log once per M15 bar
    static datetime lastCountedBar = 0;
    datetime curBar = iTime(_Symbol, PERIOD_M15, 0);
    bool isNewBarEval = (curBar != lastCountedBar);
 
-   // Determine the primary direction from HTF bias so the panel always
-   // shows the most relevant score/fail reasons even when no trade fires.
+   // Determine primary direction from HTF bias
    ENUM_ATLAS_BIAS combinedBias;
    if(gBias.weekly == gBias.daily && gBias.weekly != BIAS_NEUTRAL)
       combinedBias = gBias.weekly;
@@ -2858,39 +2904,92 @@ void CheckForEntry()
 
    bool preferBull = (combinedBias != BIAS_BEARISH);
 
-   // Evaluate primary direction first and save its score for the panel.
+   // Evaluate primary direction and snapshot for panel restore
    gScore.failCount = 0;
    bool okPrimary = ValidateSetup(preferBull);
-   SScoreCard primaryScore = gScore;           // snapshot for panel display
+   SScoreCard primaryScore = gScore;
    ENUM_ATLAS_GRADE primaryGrade = CalcGrade(gScore.total);
 
    if(okPrimary)
    {
-      if(isNewBarEval) { gDailyChecked++; lastCountedBar = curBar; }
+      if(isNewBarEval)
+      {
+         string reasons = "";
+         for(int i = 0; i < MathMin(gScore.failCount, 3); i++)
+            reasons += (i > 0 ? " | " : "") + gScore.failReasons[i];
+         Print("SETUP FOUND [",preferBull?"BULL":"BEAR","] Score=",gScore.total,
+               " Grade=",GradeStr(primaryGrade),
+               (reasons != "" ? " | Info: "+reasons : ""));
+         lastCountedBar = curBar;
+      }
       gSetupReady = true;
       gSetupBull  = preferBull;
       gCurGrade   = primaryGrade;
-      PlaceTrade(preferBull);
+      bool placed = PlaceTrade(preferBull);
+      if(!placed)
+      {
+         gSetupReady = false;    // PlaceTrade blocked (SL issue etc.)
+         if(isNewBarEval) gDailyRejected++;
+         // Restore score for panel display
+         gScore    = primaryScore;
+         gCurGrade = primaryGrade;
+      }
+      else
+      {
+         if(isNewBarEval) gDailyChecked++;
+      }
       return;
    }
 
-   // Try opposite direction (counter-trend only when primary fails)
+   // Try opposite direction (counter-trend) when primary fails
    gScore.failCount = 0;
    bool okSecond = ValidateSetup(!preferBull);
 
    if(okSecond)
    {
-      if(isNewBarEval) { gDailyChecked++; lastCountedBar = curBar; }
+      if(isNewBarEval)
+      {
+         string reasons = "";
+         for(int i = 0; i < MathMin(gScore.failCount, 3); i++)
+            reasons += (i > 0 ? " | " : "") + gScore.failReasons[i];
+         Print("SETUP FOUND [",!preferBull?"BULL":"BEAR","] Score=",gScore.total,
+               " Grade=",GradeStr(CalcGrade(gScore.total)),
+               (reasons != "" ? " | Info: "+reasons : ""));
+         lastCountedBar = curBar;
+      }
       gSetupReady = true;
       gSetupBull  = !preferBull;
       gCurGrade   = CalcGrade(gScore.total);
-      PlaceTrade(!preferBull);
+      bool placed = PlaceTrade(!preferBull);
+      if(!placed)
+      {
+         gSetupReady = false;
+         if(isNewBarEval) gDailyRejected++;
+         gScore    = primaryScore;
+         gCurGrade = primaryGrade;
+      }
+      else
+      {
+         if(isNewBarEval) gDailyChecked++;
+      }
       return;
    }
 
-   // No trade — restore primary-direction score so the panel shows
-   // WHY the bias-aligned direction was rejected (not the opposite one).
-   if(isNewBarEval) { gDailyRejected++; lastCountedBar = curBar; }
+   // No valid setup — restore primary score for panel display
+   if(isNewBarEval)
+   {
+      gDailyRejected++;
+      lastCountedBar = curBar;
+      if(gSweepDone && gSweepBull == preferBull)
+      {
+         // Sweep active but something else blocked — print top reason
+         string reasons = "";
+         for(int i = 0; i < MathMin(primaryScore.failCount, 3); i++)
+            reasons += (i > 0 ? " | " : "") + primaryScore.failReasons[i];
+         Print("SETUP REJECTED [",preferBull?"BULL":"BEAR","] Score=",primaryScore.total,
+               " — ", (reasons != "" ? reasons : "No active sweep"));
+      }
+   }
    gScore      = primaryScore;
    gCurGrade   = primaryGrade;
    gSetupReady = false;
