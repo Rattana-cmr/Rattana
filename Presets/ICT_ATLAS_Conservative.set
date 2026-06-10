@@ -1,0 +1,76 @@
+; ICT ATLAS EA V1.0 — Conservative Preset
+; Target: 3-8 high-quality trades/day | Win Rate 60%+ | RR 1:3
+; Best for: XAUUSD M15, major sessions only
+
+SymPreset=1                    ; XAUUSD
+
+; Bias
+UseBiasEngine=true
+RequireWeeklyBias=true
+RequireDailyBias=true
+RequireH4Bias=false
+BiasSwingLookback=5
+
+; Liquidity
+UseLiquidityEngine=true
+UseEQHEQL=true
+EQHTolerance=5.0
+LiqLookbackBars=50
+SweepWickMinPips=2
+
+; Structure
+UseMSSFilter=true
+UseBOSFilter=false
+MSSwingLookback=3
+MSSLookbackBars=30
+
+; Displacement
+UseDispFilter=true
+DispMinBodyPct=0.60
+DispMinATRMulti=1.30
+DispLookbackBars=5
+
+; FVG
+UseFVGFilter=true
+UseFVGEntry=true
+UseIFVG=true
+FVGMaxAgeBars=50
+MaxFVGsTracked=20
+
+; Premium/Discount
+UsePremDiscFilter=true
+DiscountZone=0.50
+PremiumZone=0.50
+
+; Sessions
+UseSessionFilter=true
+SessionAsian=false
+SessionLondon=true
+SessionNewYork=true
+SessionNYPM=false
+
+; Scoring
+UseScoringSystem=true
+MinScore=80
+
+; Risk
+MaxTradesPerDay=10
+MaxConsecLosses=3
+RiskPercent=0.5
+MaxSLPips=80
+MinSLPips=15
+CooldownMinutes=15
+
+; Aggressive Mode — OFF
+AggressiveMode=false
+ScalperMode=false
+ExpandKillzones=false
+AllowContinuation=false
+AggrStrictKillzone=true
+AggrRequireFVG=true
+AggrStrictPremDisc=true
+
+; Debug
+DebugLogs=true
+ShowPanel=true
+ShowStatPanel=true
