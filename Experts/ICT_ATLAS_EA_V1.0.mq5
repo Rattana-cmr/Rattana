@@ -2505,10 +2505,25 @@ void UpdatePanel()
    static bool prevCollapsed = false;
    if(prevCollapsed != gPanelCollapsed) { DeletePanel(); prevCollapsed = gPanelCollapsed; }
 
-   // === HEADER (always visible) ===
-   // BG height = 0 here; set to real height at end atomically with ChartRedraw → no flash
    int hdrH = lh + 16;
-   RectSet("ATLASP_BG",  x-4, y-4, PANEL_W, 0,    COL_BG,  COL_BORDER);
+
+   // Create BG once — never reset YSIZE to 0 mid-update (that is what causes the flash)
+   if(ObjectFind(0, "ATLASP_BG") < 0)
+   {
+      ObjectCreate(0, "ATLASP_BG", OBJ_RECTANGLE_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, "ATLASP_BG", OBJPROP_CORNER,       CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, "ATLASP_BG", OBJPROP_BACK,         false);
+      ObjectSetInteger(0, "ATLASP_BG", OBJPROP_SELECTABLE,   false);
+      ObjectSetInteger(0, "ATLASP_BG", OBJPROP_BGCOLOR,      COL_BG);
+      ObjectSetInteger(0, "ATLASP_BG", OBJPROP_BORDER_COLOR, COL_BORDER);
+      ObjectSetInteger(0, "ATLASP_BG", OBJPROP_XSIZE,        PANEL_W);
+      ObjectSetInteger(0, "ATLASP_BG", OBJPROP_YSIZE,        hdrH);
+   }
+   // Always update position + width (supports drag)
+   ObjectSetInteger(0, "ATLASP_BG", OBJPROP_XDISTANCE, x-4);
+   ObjectSetInteger(0, "ATLASP_BG", OBJPROP_YDISTANCE, y-4);
+   ObjectSetInteger(0, "ATLASP_BG", OBJPROP_XSIZE,     PANEL_W);
+
    RectSet("ATLASP_HDR", x-4, y-4, PANEL_W, hdrH, COL_HDR, COL_BORDER);
    LabelSet("ATLASP_T",   " ICT ATLAS EA V1.0", x, y+4, COL_GOLD, 11);
    LabelSet("ATLASP_BTN", gPanelCollapsed ? " [+]" : " [-]", x+PANEL_W-36, y+4, COL_GOLD, 11);
@@ -2516,7 +2531,8 @@ void UpdatePanel()
 
    if(gPanelCollapsed)
    {
-      ObjectSetInteger(0, "ATLASP_BG", OBJPROP_YSIZE, hdrH);
+      static int prevHdrH = 0;
+      if(hdrH != prevHdrH) { ObjectSetInteger(0, "ATLASP_BG", OBJPROP_YSIZE, hdrH); prevHdrH = hdrH; }
       ChartRedraw(0);
       return;
    }
@@ -2760,7 +2776,10 @@ void UpdatePanel()
       }
    }
 
-   ObjectSetInteger(0, "ATLASP_BG", OBJPROP_YSIZE, row * lh + 14);
+   // Only resize BG when panel height actually changes (section toggle / first draw)
+   static int prevBGH = -1;
+   int newBGH = row * lh + 14;
+   if(newBGH != prevBGH) { ObjectSetInteger(0, "ATLASP_BG", OBJPROP_YSIZE, newBGH); prevBGH = newBGH; }
    ChartRedraw(0);
 }
 
