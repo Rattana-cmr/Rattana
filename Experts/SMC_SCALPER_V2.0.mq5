@@ -79,6 +79,17 @@ input int    ScoreOB              = 20;    // +pts for order block entry
 input bool   RequireFVGEntry      = false; // Only enter when price inside FVG
 input bool   RequireOBEntry       = false; // Only enter when price at order block
 
+//--- [P11] EMA PULLBACK SIGNAL -------------------------------------
+input group "========== [P11] EMA PULLBACK SIGNAL =========="
+input bool   UsePullbackMode      = false; // Enable EMA pullback signal
+input int    PullbackEMAPeriod    = 21;    // Fast EMA period for pullback
+input int    ScorePullback        = 20;    // +pts for EMA pullback bounce
+
+//--- [P12] ENGULFING CANDLE SIGNAL ---------------------------------
+input group "========== [P12] ENGULFING CANDLE SIGNAL =========="
+input bool   UseEngulfing         = false; // Enable engulfing candle signal
+input int    ScoreEngulfing       = 20;    // +pts for engulfing candle
+
 //--- SL / TP -------------------------------------------------------
 input group "========== STOP LOSS / TAKE PROFIT =========="
 input double SLMultiATR           = 0.8;   // SL = ATR × this
@@ -134,7 +145,7 @@ input int    NewsMinAfter         = 30;    // Block N min after news
 
 //--- SESSIONS (GMT) ------------------------------------------------
 input group "========== SESSIONS (GMT TIME) =========="
-input bool   AutoGMT_SC           = true;
+input bool   AutoGMT_SC           = false;
 input int    GMTOffsetSC          = 0;
 input bool   SydneySC             = false;
 input bool   TokyoSC              = false;
@@ -172,6 +183,7 @@ struct OBZone      { double hi; double lo; bool bull; bool active; int barFormed
 // Indicator handles
 int   hATR_SC      = INVALID_HANDLE;
 int   hHTFEMA      = INVALID_HANDLE;
+int   hFastEMA     = INVALID_HANDLE;    // [P11] EMA pullback
 
 // Timing
 datetime lastBarSC   = 0;
@@ -190,6 +202,8 @@ FVGZone fvg;
 OBZone  ob;
 bool   htfBull        = false;    bool htfBear   = false;
 int    lastScore      = 0;
+bool   emaPullBull    = false;    bool emaPullBear  = false;   // [P11]
+bool   engulfBull     = false;    bool engulfBear   = false;   // [P12]
 
 // Daily tracking
 double   dayStartBal  = 0;
@@ -242,6 +256,13 @@ int OnInit()
    if(hATR_SC==INVALID_HANDLE || hHTFEMA==INVALID_HANDLE)
    { Alert(EA_SC+": Indicator handle failed!"); return INIT_FAILED; }
 
+   if(UsePullbackMode)
+   {
+      hFastEMA = iMA(_Symbol, _Period, PullbackEMAPeriod, 0, MODE_EMA, PRICE_CLOSE);
+      if(hFastEMA==INVALID_HANDLE)
+      { Alert(EA_SC+": FastEMA handle failed!"); return INIT_FAILED; }
+   }
+
    trade.SetExpertMagicNumber(MAGIC_SC);
    trade.SetDeviationInPoints(30);
    uint ff=(uint)SymbolInfoInteger(_Symbol,SYMBOL_FILLING_MODE);
@@ -275,8 +296,9 @@ int OnInit()
 void OnDeinit(const int reason)
 {
    SaveStats();
-   if(hATR_SC !=INVALID_HANDLE) IndicatorRelease(hATR_SC);
-   if(hHTFEMA !=INVALID_HANDLE) IndicatorRelease(hHTFEMA);
+   if(hATR_SC  !=INVALID_HANDLE) IndicatorRelease(hATR_SC);
+   if(hHTFEMA  !=INVALID_HANDLE) IndicatorRelease(hHTFEMA);
+   if(hFastEMA !=INVALID_HANDLE) IndicatorRelease(hFastEMA);
    ObjectsDeleteAll(0,PFX_SC);
    Print(EA_SC,": Stopped. T=",statTrades," W=",statWins," PnL=",DoubleToString(statPnL,2));
 }
@@ -393,11 +415,13 @@ void UpdateSMCContext()
    if(bars < SwingLookback+SwingConfirm+5) return;
 
    FindSwings();
-   if(UseBOS)      DetectBOS();
-   if(UseCHOCH)    DetectCHOCH();
-   if(UseLiqSweep) DetectSweep();
-   if(UseFVG)      DetectFVG();
-   if(UseOB)       DetectOB();
+   if(UseBOS)          DetectBOS();
+   if(UseCHOCH)        DetectCHOCH();
+   if(UseLiqSweep)     DetectSweep();
+   if(UseFVG)          DetectFVG();
+   if(UseOB)           DetectOB();
+   if(UsePullbackMode) DetectEMAPullback();
+   if(UseEngulfing)    DetectEngulfing();
    GetHTFTrend();
 
    // Expire old signals [P10]
@@ -615,6 +639,57 @@ void DetectOB()
 }
 
 //===================================================================//
+//  [P11] EMA PULLBACK DETECTION
+//===================================================================//
+void DetectEMAPullback()
+{
+   emaPullBull = false; emaPullBear = false;
+   if(!UsePullbackMode || hFastEMA==INVALID_HANDLE) return;
+
+   double ema[]; ArraySetAsSeries(ema,true);
+   if(CopyBuffer(hFastEMA,0,0,4,ema)<4) return;
+
+   double c1=iClose(_Symbol,_Period,1), c2=iClose(_Symbol,_Period,2);
+   double l1=iLow (_Symbol,_Period,1), h1=iHigh(_Symbol,_Period,1);
+   double emaVal=ema[1];
+
+   // Bullish pullback: bar[-1] low touched EMA zone and closed above EMA
+   double zonePct = 0.0005 * emaVal;  // 0.05% of EMA = tolerance band
+   if(l1 <= emaVal+zonePct && c1 > emaVal && c1 > c2)
+      emaPullBull = true;
+
+   // Bearish pullback: bar[-1] high touched EMA zone and closed below EMA
+   if(h1 >= emaVal-zonePct && c1 < emaVal && c1 < c2)
+      emaPullBear = true;
+
+   if(DebugSC && (emaPullBull||emaPullBear))
+      Print("[P11] EMAPull ",emaPullBull?"BULL":"BEAR"," EMA=",DoubleToString(emaVal,_Digits));
+}
+
+//===================================================================//
+//  [P12] ENGULFING CANDLE DETECTION
+//===================================================================//
+void DetectEngulfing()
+{
+   engulfBull = false; engulfBear = false;
+   if(!UseEngulfing) return;
+
+   double o1=iOpen (_Symbol,_Period,1), c1=iClose(_Symbol,_Period,1);
+   double o2=iOpen (_Symbol,_Period,2), c2=iClose(_Symbol,_Period,2);
+
+   // Bullish engulfing: bar[-2] bearish, bar[-1] bullish body engulfs bar[-2] body
+   if(c2<o2 && c1>o1 && o1<=c2 && c1>=o2)
+      engulfBull = true;
+
+   // Bearish engulfing: bar[-2] bullish, bar[-1] bearish body engulfs bar[-2] body
+   if(c2>o2 && c1<o1 && o1>=c2 && c1<=o2)
+      engulfBear = true;
+
+   if(DebugSC && (engulfBull||engulfBear))
+      Print("[P12] Engulf ",engulfBull?"BULL":"BEAR");
+}
+
+//===================================================================//
 //  HTF TREND [P2]
 //===================================================================//
 void GetHTFTrend()
@@ -654,6 +729,14 @@ void CalcScore(int &scoreBuy, int &scoreSell)
    // Order Block (active and price at OB)
    if(ob.active && ob.bull  && ask>=ob.lo && ask<=ob.hi) scoreBuy  += ScoreOB;
    if(ob.active && !ob.bull && bid>=ob.lo && bid<=ob.hi) scoreSell += ScoreOB;
+
+   // [P11] EMA Pullback
+   if(emaPullBull) scoreBuy  += ScorePullback;
+   if(emaPullBear) scoreSell += ScorePullback;
+
+   // [P12] Engulfing Candle
+   if(engulfBull)  scoreBuy  += ScoreEngulfing;
+   if(engulfBear)  scoreSell += ScoreEngulfing;
 }
 
 //===================================================================//
@@ -905,7 +988,7 @@ bool IsSession()
 {
    int gh=(int)(((TimeCurrent()/3600)+gmtOffsetSC)%24); if(gh<0)gh+=24;
    return (SydneySC &&(gh>=22||gh<2)) || (TokyoSC&&gh>=0&&gh<4) ||
-          (LondonSC &&gh>=8&&gh<12)   || (NewYorkSC&&gh>=13&&gh<17) ||
+          (LondonSC &&gh>=8&&gh<12)   || (NewYorkSC&&gh>=12&&gh<18) ||
           (OverlapSC&&gh>=13&&gh<16);
 }
 
