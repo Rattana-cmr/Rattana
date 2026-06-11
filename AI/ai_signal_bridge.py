@@ -34,9 +34,10 @@ import time
 from datetime import datetime
 
 # ════════════════════════════════════════════════════════════════
-# CONFIGURE THIS PATH — MT5 Common Files folder
+# PATH — auto-detected from script location (no manual setup needed)
+# Place this script in MT5 Common Files folder and it works automatically.
 # ════════════════════════════════════════════════════════════════
-MT5_FILES_PATH = r"C:\Users\YOUR_USERNAME\AppData\Roaming\MetaQuotes\Terminal\Common\Files"
+MT5_FILES_PATH = os.path.dirname(os.path.abspath(__file__))
 
 REQUEST_FILE = os.path.join(MT5_FILES_PATH, "ICT_SMC_AI_Request.txt")
 SIGNAL_FILE  = os.path.join(MT5_FILES_PATH, "ICT_SMC_AI_Signal.txt")
