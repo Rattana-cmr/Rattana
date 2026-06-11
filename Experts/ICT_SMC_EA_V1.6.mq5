@@ -1124,7 +1124,7 @@ void CheckPartialTP()
     if((pt==POSITION_TYPE_BUY?(price-entry):(entry-price))/slD<PartialCloseRR) continue;
     double vol=PositionGetDouble(POSITION_VOLUME),cv=NormalizeDouble(vol*PartialClosePercent/100.0,2);
     double minL=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN); if(cv<minL) continue;
-    PartialClosePosition(tk,cv); GlobalVariableSet(key,1);
+    GlobalVariableSet(key,1); PartialClosePosition(tk,cv);
     double beSL=pt==POSITION_TYPE_BUY?NormalizeDouble(entry+2*_Point,_Digits):NormalizeDouble(entry-2*_Point,_Digits);
     double cSL=PositionGetDouble(POSITION_SL),cTP=PositionGetDouble(POSITION_TP);
     bool mov=(pt==POSITION_TYPE_BUY&&(cSL==0||beSL>cSL))||(pt==POSITION_TYPE_SELL&&(cSL==0||beSL<cSL));
