@@ -80,8 +80,8 @@ input double ATRMultiplierTP       = 3.0;
 
 input group "========== PARTIAL TAKE PROFIT =========="
 input bool   UsePartialTP          = true;
-input double PartialClosePercent   = 35.0;   // [V1.5] 35% (was 50% — 50%@1R has negative EV)
-input double PartialCloseRR        = 1.5;    // [V1.5] 1.5R (was 1.0R)
+input double PartialClosePercent   = 35.0;   // [V1.6] 35% (was 50% — 50%@1R has negative EV)
+input double PartialCloseRR        = 1.5;    // [V1.6] 1.5R (was 1.0R)
 
 input group "========== TRADE FILTERS =========="
 input bool   UseTimeFilter         = true;
@@ -97,7 +97,7 @@ input bool   UseBOSFilter          = true;
 input bool   RequireLiquiditySweep = false;
 input bool   UseSMTFilter          = false;
 input string SMTSymbol             = "XAGUSD";
-input bool   UseDealingRange       = false;  // [V1.5] Buy in discount only / Sell in premium only
+input bool   UseDealingRange       = false;  // [V1.6] Buy in discount only / Sell in premium only
 
 input group "========== AI SIGNAL FILTER =========="
 input bool   UseAIFilter          = false;   // Enable AI signal reading from Python bridge
@@ -160,7 +160,7 @@ input bool   HTFLevelRequired      = false;
 input bool   ShowOTEZone           = true;
 input int    MinH1RangePips        = 50;
 input bool   UseH1RangeFilter      = true;
-input double MinH1RangeATRMulti    = 0.8; // [NEW V1.3] H1 range >= N * H1-ATR (SmartActive)
+input double MinH1RangeATRMulti    = 0.8; // [V1.6] H1 range >= N * H1-ATR (SmartActive)
 
 input group "========== MSS / BOS / LIQUIDITY =========="
 input int    MSSLookbackBars       = 30;
@@ -191,10 +191,10 @@ input bool   RelaxedMode           = false;
 //  GLOBALS
 //===================================================================//
 int      ATRHandle      = INVALID_HANDLE;
-int      ATRHandleH1    = INVALID_HANDLE;   // [V1.3] H1 ATR for adaptive range
+int      ATRHandleH1    = INVALID_HANDLE;   // [V1.6] H1 ATR for adaptive range
 int      FastEMAHandle  = INVALID_HANDLE;
 int      SlowEMAHandle  = INVALID_HANDLE;
-int      H4EMAHandle    = INVALID_HANDLE;   // [V1.5] H4 EMA cached (was leaked every tick)
+int      H4EMAHandle    = INVALID_HANDLE;   // [V1.6] H4 EMA cached (was leaked every tick)
 
 datetime LastBarTime        = 0;
 datetime LastTradeCloseTime = 0;
@@ -434,9 +434,9 @@ void ApplyTradingStyle()
          break;
 
       case STYLE_ULTRA_ACTIVE:
-         effMinScore=0;  // [V1.5] bypass score entirely — intent is maximum frequency
+         effMinScore=0;  // [V1.6] bypass score entirely — intent is maximum frequency
          effRiskPct=RiskPercent; effCooldown=5; effMinH1Range=10;
-         effOTEMin=0.55; effOTEMax=0.90;  // [V1.5] was 0.40-0.95 (meaninglessly wide)
+         effOTEMin=0.55; effOTEMax=0.90;  // [V1.6] was 0.40-0.95 (meaninglessly wide)
          effUseMSSFilter=false; effUseBOSFilter=false; effRequireLiqSweep=false;
          effUseDailyTrend=false; effBestHoursOnly=false; effUseH1RangeFilter=false;
          effMSSConfirm=2; effBOSConf=2; effBodyThresh=0.55; effUseATRRange=false;
@@ -611,7 +611,7 @@ bool DetectBOS(bool &isBullish)
 //===================================================================//
 bool DetectLiquiditySweep(bool &sweepBullish)
 {
-   // [V1.5] Swing-based liquidity pools: find swing high/low, check wick-through + close back
+   // [V1.6] Swing-based liquidity pools: find swing high/low, check wick-through + close back
    // Old code just used range max/min which is NOT a real liquidity sweep
    int need=LiquidityLookbackBars+5;
    MqlRates m15[]; ArraySetAsSeries(m15,true);
@@ -682,7 +682,7 @@ bool IsCISD1M(bool &isBearish)
      double h1=iHigh(_Symbol,PERIOD_M1,lb),l1=iLow(_Symbol,PERIOD_M1,lb);
      double rng=h1-l1; if(rng>0&&MathAbs(c1-o1)/rng>=effBodyThresh){isBearish=(c1<o1);return true;} }
 
-   // Method 3: pin bar — wick >= 2x body, closes in opposite half [V1.3]
+   // Method 3: pin bar — wick >= 2x body, closes in opposite half [V1.6]
    for(int lb=1;lb<=3;lb++)
    { double o1=iOpen(_Symbol,PERIOD_M1,lb),c1=iClose(_Symbol,PERIOD_M1,lb);
      double h1=iHigh(_Symbol,PERIOD_M1,lb),l1=iLow(_Symbol,PERIOD_M1,lb);
@@ -691,7 +691,7 @@ bool IsCISD1M(bool &isBearish)
      if(body>0&&upWick>=2.0*body&&c1<(h1+l1)/2.0){isBearish=true; return true;}  // shooting star
      if(body>0&&dnWick>=2.0*body&&c1>(h1+l1)/2.0){isBearish=false;return true;} } // hammer
 
-   // Method 4: 3-bar momentum [V1.3]
+   // Method 4: 3-bar momentum [V1.6]
    bool m4bull=(iClose(_Symbol,PERIOD_M1,1)>iOpen(_Symbol,PERIOD_M1,1)&&
                 iClose(_Symbol,PERIOD_M1,2)>iOpen(_Symbol,PERIOD_M1,2)&&
                 iClose(_Symbol,PERIOD_M1,3)>iOpen(_Symbol,PERIOD_M1,3));
@@ -778,7 +778,7 @@ bool IsTrendAligned(bool isBuy)
   { int bull=0,bear=0; for(int di=1;di<=3;di++){if(d1[di].close>d1[di].open)bull++;else bear++;}
     d1Up=isBuy?(bull==3):(bull>=2); d1Dn=isBuy?(bear>=2):(bear==3); }
   double h4e[1]; bool h4Up=false,h4Dn=false;
-  // [V1.5] Use cached H4EMAHandle — was creating+releasing a new handle every tick
+  // [V1.6] Use cached H4EMAHandle — was creating+releasing a new handle every tick
   if(H4EMAHandle!=INVALID_HANDLE&&CopyBuffer(H4EMAHandle,0,1,1,h4e)==1)
   { double bid=SymbolInfoDouble(_Symbol,SYMBOL_BID); h4Up=(bid>h4e[0]); h4Dn=(bid<h4e[0]); }
   if(isBuy){bool anyBull=d1Up||h4Up;bool strongBear=d1Dn&&h4Dn;if(strongBear||(!anyBull&&d1Dn))return false;}
@@ -951,7 +951,7 @@ int GetAIScoreBonus(bool isBuy)
 }
 
 //===================================================================//
-//  [V1.5] DEALING RANGE CHECK — buy in discount, sell in premium
+//  [V1.6] DEALING RANGE CHECK — buy in discount, sell in premium
 //  Uses last 6 H4 bars (~24h) to define the institutional dealing range
 //===================================================================//
 bool CheckDealingRange(bool isBuy)
@@ -1007,7 +1007,7 @@ bool CheckTwinsSequence(bool &isBuy)
    if(mssIsBullish!=isBuy)    { lastFailedStep=9;lastFailedStepDesc="MSS/OTE Conflict";return false; }
    if(cisd1MinIsBearish==isBuy){ lastFailedStep=9;lastFailedStepDesc="1M/OTE Conflict"; return false; }
 
-   // [V1.5] Dealing range: only buy in discount zone, only sell in premium zone
+   // [V1.6] Dealing range: only buy in discount zone, only sell in premium zone
    if(!CheckDealingRange(isBuy))
    { if(newBar){RejOTE();rejSeqLastBar=curBar;} lastFailedStep=9;lastFailedStepDesc="Dealing Range";return false; }
 
@@ -1050,7 +1050,7 @@ void UpdateDailyCounters()
 { MqlDateTime dt; TimeToStruct(TimeCurrent(),dt); if(dt.day==LastTradeDay) return;
   TodayTradeCount=0;TodayLossTrades=0;TodayLoss=0;
   if(ResetLossStreakDaily) consecutiveLosses=0; LastTradeDay=dt.day;
-  // [V1.5] Only reset trade/session counters — preserve MSS/BOS/structural state
+  // [V1.6] Only reset trade/session counters — preserve MSS/BOS/structural state
   // Old code reset mssConfirmed/bosConfirmed at midnight, killing valid overnight setups
   cisd1MinConfirmed=false;fvgCount1Min=-1;  // reset entry trigger only
   // Reset daily rejection counters only (cumulative untouched)
@@ -1496,7 +1496,7 @@ int OnInit()
   ATRHandleH1  =iATR(_Symbol,PERIOD_H1,14);     // V1.3
   FastEMAHandle=iMA(_Symbol,PERIOD_H1,50, 0,MODE_EMA,PRICE_CLOSE);
   SlowEMAHandle=iMA(_Symbol,PERIOD_H1,200,0,MODE_EMA,PRICE_CLOSE);
-  H4EMAHandle  =iMA(_Symbol,PERIOD_H4,50, 0,MODE_EMA,PRICE_CLOSE); // [V1.5] cached
+  H4EMAHandle  =iMA(_Symbol,PERIOD_H4,50, 0,MODE_EMA,PRICE_CLOSE); // [V1.6] cached
   if(ATRHandle==INVALID_HANDLE||FastEMAHandle==INVALID_HANDLE||SlowEMAHandle==INVALID_HANDLE||H4EMAHandle==INVALID_HANDLE)
   {Alert(EA_NAME+": Indicator handle failed");return INIT_FAILED;}
   trade.SetExpertMagicNumber(MAGIC_NUMBER); trade.SetDeviationInPoints(30); trade.SetTypeFillingBySymbol(_Symbol);
@@ -1531,7 +1531,7 @@ void OnDeinit(const int reason)
   if(ATRHandleH1  !=INVALID_HANDLE) IndicatorRelease(ATRHandleH1);
   if(FastEMAHandle!=INVALID_HANDLE) IndicatorRelease(FastEMAHandle);
   if(SlowEMAHandle!=INVALID_HANDLE) IndicatorRelease(SlowEMAHandle);
-  if(H4EMAHandle  !=INVALID_HANDLE) IndicatorRelease(H4EMAHandle);  // [V1.5]
+  if(H4EMAHandle  !=INVALID_HANDLE) IndicatorRelease(H4EMAHandle);  // [V1.6]
   for(int i=0;i<MaxSwingLines;i++) if(SwingLineNames[i]!="") ObjectDelete(0,SwingLineNames[i]);
   for(int i=0;i<4;i++) if(OTEObjectNames[i]!="") ObjectDelete(0,OTEObjectNames[i]);
   string pfx=EA_NAME+"_"+_Symbol+"_";
