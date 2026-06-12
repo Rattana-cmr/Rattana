@@ -30,33 +30,53 @@ Accumulate sufficient trade data from the validated Phase 1D-B strategy to enabl
 
 ---
 
-## Milestone Schedule
+## Dataset Scope — XAUUSD Only
 
-| Milestone | Trade Count | Action |
-|-----------|------------|--------|
-| M1 | 1,000 trades | Rerun ML pipeline, compare to Phase 3 baseline |
-| M2 | 2,500 trades | Rerun ML pipeline, assess feature stability |
-| M3 | 5,000 trades | Rerun ML pipeline, evaluate production readiness |
+**June 2026 validation confirmed the training dataset must be XAUUSD only.**
+
+Two expansion attempts were tested and rejected:
+
+| Dataset | Period | PF | Win Rate | Expectancy | Decision |
+|---------|--------|----|----------|------------|----------|
+| XAUUSD pre-2015 | 2004–2014 | 1.03 | 51.1% | $2.10 | ❌ Rejected — different market regime |
+| EURUSD | 2015–2025 | 0.90 | 35.2% | -$0.26 | ❌ Rejected — net loser, wrong instrument |
+| **XAUUSD** | **2015–2025** | **2.564** | **56.7%** | **$32.94** | **✓ Only valid dataset** |
+
+The strategy is XAUUSD-specific. The feature relationships (ATR, ADX, liquidity sweeps) that drive the edge on Gold do not transfer to forex pairs or to different Gold market regimes. All future training data must be XAUUSD from 2015 onwards.
+
+**Data collection rate: ~42 trades/year (live forward testing only)**
 
 ---
 
-## Retraining Procedure (at each milestone)
+## Revised Milestone Schedule
 
-1. Export completed trade log from MT5 as CSV — same format as `ML/data/ICT_ATLAS_Phase1DB_Trades.csv`
-2. Replace (or append to) the data file:
+Original trade-count milestones are retained as goals, but the timeline is now driven by live forward-test accumulation at ~42 trades/year.
+
+| Milestone | Trade Count | Est. Year | Action |
+|-----------|------------|-----------|--------|
+| Annual | ~42 added/year | Each year | Rerun ML pipeline, track AUC trend |
+| M1 | 1,000 total | ~2039 | Full milestone comparison |
+| M2 | 2,500 total | ~2073 | Full milestone comparison |
+| M3 | 5,000 total | ~2121 | Full milestone comparison |
+
+**Practical approach:** Rerun the ML pipeline **once per year** after exporting the updated trade log from MT5. Even small sample increases are worth tracking — the AUC trend over years is informative even before reaching 1,000 trades.
+
+---
+
+## Annual Retraining Procedure
+
+1. In MT5, export the full XAUUSD trade history as CSV (same format as `ML/data/ICT_ATLAS_Phase1DB_Trades.csv`)
+2. Replace the data file:
    ```bash
-   # Replace entirely (recommended):
    cp <new_export>.csv ML/data/ICT_ATLAS_Phase1DB_Trades.csv
-
-   # Or concatenate backtest + live data:
-   # (remove duplicate header row from the appended file)
    ```
 3. Run the existing pipeline — no code changes required:
    ```bash
    cd ML
    python run_pipeline.py
    ```
-4. Compare outputs to Phase 3 baseline (recorded below)
+4. Compare CV AUC output to Phase 3 baseline (recorded below)
+5. Upload updated results here to log in the Milestone Tracking table
 
 ---
 
@@ -180,6 +200,17 @@ Once production readiness criteria are met:
 - All features use entry-bar data only — no lookahead leakage
 - Feature engineering code should not be modified between milestone runs
 - If the EA logic must change for operational reasons during Phase 4, a new baseline run must be established before milestone comparisons are meaningful
+- Training data must be **XAUUSD only, 2015 onwards** — other instruments and earlier periods were tested and rejected in June 2026
+
+---
+
+## Dataset Validation Log
+
+| Date | Dataset | Period | PF | Win Rate | Expectancy | Decision |
+|------|---------|--------|----|----------|------------|----------|
+| Jun 2026 | XAUUSD (Phase 1D-B backtest) | 2016–2025 | 2.564 | 56.7% | $32.94 | ✓ Baseline |
+| Jun 2026 | XAUUSD Historical Extension | 2004–2014 | 1.03 | 51.1% | $2.10 | ❌ Rejected — different regime |
+| Jun 2026 | EURUSD | 2015–2025 | 0.90 | 35.2% | -$0.26 | ❌ Rejected — net loser |
 
 ---
 
