@@ -149,7 +149,7 @@ input int    DealingRangeLookback= 60;     // H4 bars for dealing range (60 = ~1
 //--- SESSION ENGINE -----------------------------------------------
 input group "══════════ [08] SESSION & KILLZONE ENGINE ══════════"
 input bool   UseSessionFilter    = true;   // Require active killzone
-input int    BrokerGMTOffset     = 0;      // Broker GMT offset (hours)
+input int    BrokerGMTOffset     = 3;      // Broker GMT offset (hours)
 input bool   AutoGMTOffset       = true;   // Auto-detect GMT offset
 input bool   SessionAsian        = false;  // Trade Asian killzone
 input bool   SessionLondon       = true;   // Trade London killzone
