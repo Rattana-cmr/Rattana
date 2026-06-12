@@ -3270,7 +3270,7 @@ void InitMLCSVFiles()
             "Score_Displacement","Score_FVG","Score_Killzone","Score_SMT",
             "Score_ADR","Score_PO3","Score_PremDisc",
             "TP1_Hit","TP2_Hit","TP3_Hit",
-            "BreakEven_Triggered","TrailingStop_Triggered");
+            "BreakEven_Triggered");
 
       if(gMLTradeFile == INVALID_HANDLE)
          Print("ATLAS ML: Cannot open trade file — ", fname);
@@ -3414,8 +3414,7 @@ void LogTradeClose(ulong ticket, datetime closeTime, double profit, double rr, c
       YN(gTrade.tp1Hit),
       YN(gTrade.tp2Hit),
       YN(gTrade.tp3Hit),
-      YN(gTrade.beSet),
-      YN(gTrade.trailActive));
+      YN(gTrade.beSet));
 }
 
 //===================================================================
