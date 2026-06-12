@@ -3615,12 +3615,15 @@ void CheckForEntry()
    }
 
    // Try opposite direction (counter-trend only when primary fails)
-   // Block SHORT as counter direction when AllowShortEntries=false or BlockShortInBullTrend fires.
-   bool shortBlocked = (!AllowShortEntries) ||
+   // counterIsShort=true only when primary is LONG (preferBull=true) → counter = SHORT.
+   // When primary is SHORT (preferBull=false) → counter = LONG, never blocked here.
+   bool counterIsShort = preferBull;
+   bool shortBlocked = (counterIsShort && !AllowShortEntries) ||
                        (BlockShortInBullTrend && preferBull &&
                         gBias.weekly == BIAS_BULLISH &&
                         GetADX(CondADXPeriod, 1) >= BullTrendADXMin);
-   if(shortBlocked && isNewBar && AllowShortEntries)
+   if(BlockShortInBullTrend && preferBull && gBias.weekly == BIAS_BULLISH &&
+      GetADX(CondADXPeriod, 1) >= BullTrendADXMin && isNewBar)
       LogSignal(gCurSetupID, false, !preferBull, "SHORT_BLOCKED",
                 "SHORT blocked: bullish weekly bias + ADX >= " + DoubleToString(BullTrendADXMin, 1));
 
