@@ -510,6 +510,7 @@ struct SActiveTrade
    bool  snapMSS, snapDisp, snapFVGPresent, snapOBPresent;
    string snapADR, snapPD, snapCond;
    bool  snapNewsBlocked;
+   string setupID;
 };
 
 struct STradeStats
@@ -651,6 +652,8 @@ string        gLastRejectReason = "";
 int           gMLSignalFile  = INVALID_HANDLE;
 int           gMLTradeFile   = INVALID_HANDLE;
 datetime      gLastSignalBar = 0;
+string        gCurSetupID    = "";
+int           gSetupCounter  = 0;
 
 //===================================================================
 // SECTION 5 — UTILITY FUNCTIONS
@@ -2232,6 +2235,7 @@ bool PlaceTrade(bool bullish)
    gTrade.snapPD         = GetPDLabel();
    gTrade.snapCond       = GetCondLabel();
    gTrade.snapNewsBlocked= IsNewsBlocked();
+   gTrade.setupID        = gCurSetupID;
 
    string key = "ATLAS_" + IntegerToString(ticket);
    GlobalVariableSet(key + "_tp1",  tp1);
@@ -3061,7 +3065,7 @@ void InitMLCSVFiles()
          gMLSignalFile = FileOpen(fname, FILE_WRITE|FILE_CSV|FILE_ANSI|FILE_COMMON, ',');
          if(gMLSignalFile != INVALID_HANDLE)
             FileWrite(gMLSignalFile,
-               "Timestamp","Symbol","Direction",
+               "SetupID","Timestamp","Symbol","Direction",
                "WeeklyBias","DailyBias","H4Bias","H1Bias",
                "PDH_Sweep","PDL_Sweep","PWH_Sweep","PWL_Sweep",
                "Asian_Sweep","EQH_Sweep","EQL_Sweep",
@@ -3089,7 +3093,7 @@ void InitMLCSVFiles()
          gMLTradeFile = FileOpen(fname, FILE_WRITE|FILE_CSV|FILE_ANSI|FILE_COMMON, ',');
          if(gMLTradeFile != INVALID_HANDLE)
             FileWrite(gMLTradeFile,
-               "Ticket","OpenTime","CloseTime","Symbol","Direction",
+               "SetupID","Ticket","OpenTime","CloseTime","Symbol","Direction",
                "EntryPrice","StopLoss","TakeProfit","LotSize","RiskPct",
                "Session","ConfluenceScore","Grade",
                "WeeklyBias","DailyBias","H4Bias","H1Bias",
@@ -3116,7 +3120,7 @@ void CloseMLCSVFiles()
    if(gMLTradeFile  != INVALID_HANDLE) { FileClose(gMLTradeFile);  gMLTradeFile  = INVALID_HANDLE; }
 }
 
-void LogSignal(bool executed, bool bullish, const string failStep, const string failReason)
+void LogSignal(const string setupID, bool executed, bool bullish, const string failStep, const string failReason)
 {
    if(!EnableMLExport || !MLExportSignals) return;
    if(gMLSignalFile == INVALID_HANDLE) return;
@@ -3131,6 +3135,7 @@ void LogSignal(bool executed, bool bullish, const string failStep, const string 
          { obPresent = true; break; }
 
    FileWrite(gMLSignalFile,
+      setupID,
       TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS),
       _Symbol,
       bullish ? "LONG" : "SHORT",
@@ -3163,6 +3168,7 @@ void LogTradeClose(ulong ticket, datetime closeTime, double profit, double rr)
                    :                     "BREAKEVEN";
 
    FileWrite(gMLTradeFile,
+      gTrade.setupID,
       IntegerToString((long)ticket),
       TimeToString(gTrade.openTime, TIME_DATE|TIME_SECONDS),
       TimeToString(closeTime,       TIME_DATE|TIME_SECONDS),
@@ -3241,6 +3247,16 @@ void CheckForEntry()
    datetime curBar = iTime(_Symbol, PERIOD_M15, 0);
    bool isNewBar = (curBar != lastCountedBar);
 
+   // Generate a unique SetupID once per new bar
+   if(isNewBar)
+   {
+      gSetupCounter++;
+      MqlDateTime dt;
+      TimeToStruct(curBar, dt);
+      gCurSetupID = StringFormat("ATLAS_%04d%02d%02d_%02d%02d%02d_%04d",
+         dt.year, dt.mon, dt.day, dt.hour, dt.min, dt.sec, gSetupCounter);
+   }
+
    // Determine the primary direction from HTF bias so the panel always
    // shows the most relevant score/fail reasons even when no trade fires.
    ENUM_ATLAS_BIAS combinedBias;
@@ -3275,7 +3291,7 @@ void CheckForEntry()
       {
          string rejStep   = placed ? "" : GetRejectedStep(gLastRejectReason);
          string rejReason = placed ? "" : gLastRejectReason;
-         LogSignal(placed, preferBull, rejStep, rejReason);
+         LogSignal(gCurSetupID, placed, preferBull, rejStep, rejReason);
       }
       return;
    }
@@ -3298,7 +3314,7 @@ void CheckForEntry()
       {
          string rejStep   = placed ? "" : GetRejectedStep(gLastRejectReason);
          string rejReason = placed ? "" : gLastRejectReason;
-         LogSignal(placed, !preferBull, rejStep, rejReason);
+         LogSignal(gCurSetupID, placed, !preferBull, rejStep, rejReason);
       }
       return;
    }
@@ -3315,7 +3331,7 @@ void CheckForEntry()
       lastCountedBar = curBar;
       string step   = primaryScore.failCount > 0 ? GetRejectedStep(primaryScore.failReasons[0]) : "NONE";
       string reason = primaryScore.failCount > 0 ? primaryScore.failReasons[0] : "No setup";
-      LogSignal(false, preferBull, step, reason);
+      LogSignal(gCurSetupID, false, preferBull, step, reason);
 
       if(DebugLogs)
       {
