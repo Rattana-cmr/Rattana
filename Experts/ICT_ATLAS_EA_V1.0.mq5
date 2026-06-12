@@ -205,6 +205,8 @@ input bool   TradeInChoppy       = false;  // Trade in choppy market
 input int    CondADXPeriod       = 14;     // ADX period
 input double CondADXTrend        = 25.0;   // ADX threshold for trending
 input double CondADXChoppy       = 18.0;   // ADX threshold below = choppy
+input bool   BlockShortInBullTrend = false; // Block SHORT trades in strong bullish trending market
+input double BullTrendADXMin     = 30.0;   // Min ADX to consider "strong bull trend" for short blocking
 
 //--- SPREAD / SLIPPAGE -------------------------------------------
 input group "══════════ [15-16] SPREAD & SLIPPAGE FILTERS ══════════"
@@ -514,6 +516,13 @@ struct SActiveTrade
    double snapSpread;
    double snapADX;
    string setupID;
+   // Individual score component snapshots (logged to both CSVs)
+   int  snapScoreWeekly, snapScoreDaily, snapScoreLiqSweep, snapScoreMSS;
+   int  snapScoreDisp, snapScoreFVG, snapScoreKillzone, snapScoreSMT;
+   int  snapScoreADR, snapScorePO3, snapScorePremDisc;
+   // Trade outcome flags (populated at close time)
+   bool tp3Hit;       // TP3 runner fully hit (TakeProfit exit)
+   bool trailActive;  // Trade closed by trailing stop
 };
 
 struct STradeStats
@@ -2284,6 +2293,21 @@ bool PlaceTrade(bool bullish)
    gTrade.snapSpread     = GetCurrentSpreadPips();
    gTrade.snapADX        = GetADX(CondADXPeriod, 1);
    gTrade.setupID        = gCurSetupID;
+   // Individual score component snapshots
+   gTrade.snapScoreWeekly   = gScore.weeklyBias;
+   gTrade.snapScoreDaily    = gScore.dailyBias;
+   gTrade.snapScoreLiqSweep = gScore.liqSweep;
+   gTrade.snapScoreMSS      = gScore.mss;
+   gTrade.snapScoreDisp     = gScore.displacement;
+   gTrade.snapScoreFVG      = gScore.fvg;
+   gTrade.snapScoreKillzone = gScore.killzone;
+   gTrade.snapScoreSMT      = gScore.smt;
+   gTrade.snapScoreADR      = gScore.adrScore;
+   gTrade.snapScorePO3      = gScore.po3;
+   gTrade.snapScorePremDisc = gScore.premDisc;
+   // Outcome flags reset on open
+   gTrade.tp3Hit     = false;
+   gTrade.trailActive= false;
 
    string key = "ATLAS_" + IntegerToString(ticket);
    GlobalVariableSet(key + "_tp1",  tp1);
@@ -3003,7 +3027,7 @@ string GetExitReason(ulong ticket)
 
    switch(reason)
    {
-      case DEAL_REASON_TP:     return "TakeProfit";
+      case DEAL_REASON_TP:     return "TP3_Full";
       case DEAL_REASON_SL:     return gTrade.beSet ? "BreakEven"
                                      : (UseTrailingStop && gTrade.tp2Hit ? "TrailingStop" : "StopLoss");
       case DEAL_REASON_CLIENT:
@@ -3039,6 +3063,8 @@ void CheckForClosedTrades()
       string reason = GetExitReason(dk);
 
       accProfit += profit; // Accumulates partials + final close
+      if(reason == "TP3_Full")     gTrade.tp3Hit    = true;
+      if(reason == "TrailingStop") gTrade.trailActive = true;
       if(StringFind(reason, "Partial") < 0) // Final (non-partial) close
       {
          finalDeal   = dk;
@@ -3048,6 +3074,12 @@ void CheckForClosedTrades()
    }
 
    if(finalDeal == 0) return;
+
+   // Read TP1/TP2/BE outcome flags from GlobalVariables before they are deleted
+   string gvKey = "ATLAS_" + IntegerToString(gTrade.ticket);
+   if(GlobalVariableCheck(gvKey+"_t1h")) gTrade.tp1Hit = (bool)GlobalVariableGet(gvKey+"_t1h");
+   if(GlobalVariableCheck(gvKey+"_t2h")) gTrade.tp2Hit = (bool)GlobalVariableGet(gvKey+"_t2h");
+   if(GlobalVariableCheck(gvKey+"_be"))  gTrade.beSet  = (bool)GlobalVariableGet(gvKey+"_be");
 
    double rv = GlobalVariableCheck("ATLAS_"+IntegerToString(gTrade.ticket)+"_rv")
                ? GlobalVariableGet("ATLAS_"+IntegerToString(gTrade.ticket)+"_rv") : 0;
@@ -3182,7 +3214,10 @@ void InitMLCSVFiles()
             "ConfluenceScore","Grade",
             "Trade_Executed","Rejected_Step","Rejected_Reason",
             "ATR14_Pips","ATR50_Pips","Spread_Pips","SpreadPctATR",
-            "ADX_Value","PlannedRR");
+            "ADX_Value","PlannedRR",
+            "Score_Weekly","Score_Daily","Score_LiqSweep","Score_MSS",
+            "Score_Displacement","Score_FVG","Score_Killzone","Score_SMT",
+            "Score_ADR","Score_PO3","Score_PremDisc");
 
       if(gMLSignalFile == INVALID_HANDLE)
          Print("ATLAS ML: Cannot open signal file — ", fname);
@@ -3230,7 +3265,12 @@ void InitMLCSVFiles()
             "PlannedRR","RR_Achieved",
             "MFE_Pips","MAE_Pips",
             "MinutesInTrade","BarsInTrade",
-            "ExitReason","Trade_Result");
+            "ExitReason","Trade_Result",
+            "Score_Weekly","Score_Daily","Score_LiqSweep","Score_MSS",
+            "Score_Displacement","Score_FVG","Score_Killzone","Score_SMT",
+            "Score_ADR","Score_PO3","Score_PremDisc",
+            "TP1_Hit","TP2_Hit","TP3_Hit",
+            "BreakEven_Triggered","TrailingStop_Triggered");
 
       if(gMLTradeFile == INVALID_HANDLE)
          Print("ATLAS ML: Cannot open trade file — ", fname);
@@ -3292,7 +3332,18 @@ void LogSignal(const string setupID, bool executed, bool bullish, const string f
       DoubleToString(spread, 2),
       DoubleToString(spdPct, 2),
       DoubleToString(adx,    2),
-      DoubleToString(TP3_RR, 2));
+      DoubleToString(TP3_RR, 2),
+      IntegerToString(gScore.weeklyBias),
+      IntegerToString(gScore.dailyBias),
+      IntegerToString(gScore.liqSweep),
+      IntegerToString(gScore.mss),
+      IntegerToString(gScore.displacement),
+      IntegerToString(gScore.fvg),
+      IntegerToString(gScore.killzone),
+      IntegerToString(gScore.smt),
+      IntegerToString(gScore.adrScore),
+      IntegerToString(gScore.po3),
+      IntegerToString(gScore.premDisc));
 }
 
 void LogTradeClose(ulong ticket, datetime closeTime, double profit, double rr, const string exitReason)
@@ -3348,7 +3399,23 @@ void LogTradeClose(ulong ticket, datetime closeTime, double profit, double rr, c
       IntegerToString(minInTrade),
       IntegerToString(barsInTrade),
       exitReason,
-      result);
+      result,
+      IntegerToString(gTrade.snapScoreWeekly),
+      IntegerToString(gTrade.snapScoreDaily),
+      IntegerToString(gTrade.snapScoreLiqSweep),
+      IntegerToString(gTrade.snapScoreMSS),
+      IntegerToString(gTrade.snapScoreDisp),
+      IntegerToString(gTrade.snapScoreFVG),
+      IntegerToString(gTrade.snapScoreKillzone),
+      IntegerToString(gTrade.snapScoreSMT),
+      IntegerToString(gTrade.snapScoreADR),
+      IntegerToString(gTrade.snapScorePO3),
+      IntegerToString(gTrade.snapScorePremDisc),
+      YN(gTrade.tp1Hit),
+      YN(gTrade.tp2Hit),
+      YN(gTrade.tp3Hit),
+      YN(gTrade.beSet),
+      YN(gTrade.trailActive));
 }
 
 //===================================================================
@@ -3449,8 +3516,16 @@ void CheckForEntry()
    }
 
    // Try opposite direction (counter-trend only when primary fails)
+   // Optional: block SHORT trades in strong bullish trending environments
+   bool shortBlocked = BlockShortInBullTrend && preferBull &&
+                       gBias.weekly == BIAS_BULLISH &&
+                       GetADX(CondADXPeriod, 1) >= BullTrendADXMin;
+   if(shortBlocked && isNewBar)
+      LogSignal(gCurSetupID, false, !preferBull, "SHORT_BLOCKED",
+                "SHORT blocked: bullish weekly bias + ADX >= " + DoubleToString(BullTrendADXMin, 1));
+
    gScore.failCount = 0;
-   bool okSecond = ValidateSetup(!preferBull);
+   bool okSecond = !shortBlocked && ValidateSetup(!preferBull);
 
    if(okSecond)
    {
