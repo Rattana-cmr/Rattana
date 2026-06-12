@@ -49,11 +49,25 @@ When the user uploads a new trade export CSV:
 3. Report: AUC, Precision, Recall, Feature Importance, SHAP, Threshold Analysis
 4. Compare to Phase 3 baseline (AUC 0.518)
 
+## Research Track (Separate from Production)
+
+A signal-based research track is active. It uses ATR triple-barrier labeling on all logged signals — not just executed trades. **Never mix research track outputs with Phase 1D-B production decisions.**
+
+- Entry point: `python ML/run_research_pipeline.py`
+- Labeling: `python ML/scripts/label_signals.py`
+- Current results: XGB AUC 0.718 (win_loss), 0.856 (tp3_hit) on 3,865 signals
+- Key finding: PWL Sweep (+10.4%), EQL Sweep (+4.3%), ADX, ATR ratio are top predictors
+- Outputs: `ML/outputs/research/`
+- Report: `Reports/ICT_ATLAS_Research_Track_Report.md`
+
+To expand: export new All Signals CSV from MT5 backtest + M15 bars, re-run label_signals.py.
+
 ## Key Reports
 
 - Full project status: `Reports/ICT_ATLAS_Project_Status_LOCKED.md`
 - Phase 3 ML findings: `Reports/ICT_ATLAS_Phase3_ML_Report.md`
 - Phase 4 data plan: `Reports/ICT_ATLAS_Phase4_DataCollection_Plan.md`
+- Research track findings: `Reports/ICT_ATLAS_Research_Track_Report.md`
 
 ## Branch
 
