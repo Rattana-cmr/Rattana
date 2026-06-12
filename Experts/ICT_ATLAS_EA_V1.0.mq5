@@ -210,6 +210,7 @@ input double BullTrendADXMin     = 30.0;   // Min ADX to consider "strong bull t
 
 //--- PHASE 1C FILTERS --------------------------------------------
 input group "══════════ [P1C] EDGE VALIDATION FILTERS ══════════"
+input bool   AllowShortEntries    = true;  // [P1D] Allow SHORT trades — set FALSE for LONG-only mode
 input bool   RequirePremDiscAlign = false; // [P1C] Require PREMIUM zone for LONG, DISCOUNT zone for SHORT
 input bool   BlockLondonHours     = false; // [P1C] Block all entries during London killzone hours
 input bool   BlockShortInTrend    = false; // [P1C] Block SHORT trades when TRENDING + ADX >= TrendShortADXMin
@@ -3583,8 +3584,12 @@ void CheckForEntry()
    bool preferBull = (combinedBias != BIAS_BEARISH);
 
    // Evaluate primary direction first and save its score for the panel.
+   // Block SHORT as primary direction when AllowShortEntries=false.
+   bool primaryIsShort = !preferBull;
    gScore.failCount = 0;
-   bool okPrimary = ValidateSetup(preferBull);
+   bool okPrimary = (!AllowShortEntries && primaryIsShort) ? false : ValidateSetup(preferBull);
+   if(!AllowShortEntries && primaryIsShort && isNewBar)
+      LogSignal(gCurSetupID, false, false, "SHORT_BLOCKED", "SHORT entries disabled (AllowShortEntries=false)");
    SScoreCard primaryScore = gScore;
    ENUM_ATLAS_GRADE primaryGrade = CalcGrade(gScore.total);
 
@@ -3610,11 +3615,12 @@ void CheckForEntry()
    }
 
    // Try opposite direction (counter-trend only when primary fails)
-   // Optional: block SHORT trades in strong bullish trending environments
-   bool shortBlocked = BlockShortInBullTrend && preferBull &&
-                       gBias.weekly == BIAS_BULLISH &&
-                       GetADX(CondADXPeriod, 1) >= BullTrendADXMin;
-   if(shortBlocked && isNewBar)
+   // Block SHORT as counter direction when AllowShortEntries=false or BlockShortInBullTrend fires.
+   bool shortBlocked = (!AllowShortEntries) ||
+                       (BlockShortInBullTrend && preferBull &&
+                        gBias.weekly == BIAS_BULLISH &&
+                        GetADX(CondADXPeriod, 1) >= BullTrendADXMin);
+   if(shortBlocked && isNewBar && AllowShortEntries)
       LogSignal(gCurSetupID, false, !preferBull, "SHORT_BLOCKED",
                 "SHORT blocked: bullish weekly bias + ADX >= " + DoubleToString(BullTrendADXMin, 1));
 
