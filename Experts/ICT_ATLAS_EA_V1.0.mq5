@@ -509,7 +509,10 @@ struct SActiveTrade
    bool  snapAsianSwept, snapEQHSwept, snapEQLSwept;
    bool  snapMSS, snapDisp, snapFVGPresent, snapOBPresent;
    string snapADR, snapPD, snapCond;
-   bool  snapNewsBlocked;
+   bool   snapNewsBlocked;
+   double snapATR14, snapATR50;
+   double snapSpread;
+   double snapADX;
    string setupID;
 };
 
@@ -586,7 +589,9 @@ int           gLastTradeDay   = -1;
 
 // Indicator handles
 int           gATR14    = INVALID_HANDLE;
+int           gATR50    = INVALID_HANDLE;
 int           gADX14    = INVALID_HANDLE;
+double        gPartialProfit = 0;
 
 // Panel
 int           gPanelX   = 12;
@@ -756,6 +761,33 @@ double GetATRMain(int shift = 1)
    double buf[1];
    if(CopyBuffer(gATR14, 0, shift, 1, buf) != 1) return 0;
    return buf[0];
+}
+
+double GetATR50(int shift = 1)
+{
+   if(gATR50 == INVALID_HANDLE) return 0;
+   double buf[1];
+   if(CopyBuffer(gATR50, 0, shift, 1, buf) != 1) return 0;
+   return buf[0];
+}
+
+double GetCurrentSpreadPips()
+{
+   return ToPips(SymbolInfoDouble(_Symbol, SYMBOL_ASK) - SymbolInfoDouble(_Symbol, SYMBOL_BID));
+}
+
+string DayOfWeekStr(datetime t)
+{
+   MqlDateTime dt; TimeToStruct(t, dt);
+   switch(dt.day_of_week)
+   {
+      case 1: return "Monday";
+      case 2: return "Tuesday";
+      case 3: return "Wednesday";
+      case 4: return "Thursday";
+      case 5: return "Friday";
+      default: return "Weekend";
+   }
 }
 
 bool HasOpenPosition()
@@ -2235,6 +2267,10 @@ bool PlaceTrade(bool bullish)
    gTrade.snapPD         = GetPDLabel();
    gTrade.snapCond       = GetCondLabel();
    gTrade.snapNewsBlocked= IsNewsBlocked();
+   gTrade.snapATR14      = ToPips(GetATRMain(1));
+   gTrade.snapATR50      = ToPips(GetATR50(1));
+   gTrade.snapSpread     = GetCurrentSpreadPips();
+   gTrade.snapADX        = GetADX(CondADXPeriod, 1);
    gTrade.setupID        = gCurSetupID;
 
    string key = "ATLAS_" + IntegerToString(ticket);
@@ -2944,6 +2980,28 @@ void DeletePanel()
 // SECTION 27 — ONTRADE (closed position handler)
 //===================================================================
 
+string GetExitReason(ulong ticket)
+{
+   string comment = HistoryDealGetString (ticket, DEAL_COMMENT);
+   int    reason  = (int)HistoryDealGetInteger(ticket, DEAL_REASON);
+
+   if(StringFind(comment, "TP1-Partial") >= 0) return "TP1_Partial";
+   if(StringFind(comment, "TP2-Partial") >= 0) return "TP2_Partial";
+   if(StringFind(comment, "Friday")      >= 0) return "FridayClose";
+
+   switch(reason)
+   {
+      case DEAL_REASON_TP:     return "TakeProfit";
+      case DEAL_REASON_SL:     return gTrade.beSet ? "BreakEven"
+                                     : (UseTrailingStop && gTrade.tp2Hit ? "TrailingStop" : "StopLoss");
+      case DEAL_REASON_CLIENT:
+      case DEAL_REASON_MOBILE:
+      case DEAL_REASON_WEB:    return "ManualClose";
+      case DEAL_REASON_SO:     return "StopOut";
+      default:                 return "ExpertAdvisor";
+   }
+}
+
 void OnTrade()
 {
    if(!HistorySelect(TimeCurrent() - 86400, TimeCurrent())) return;
@@ -2953,22 +3011,36 @@ void OnTrade()
    {
       ulong ticket = HistoryDealGetTicket(i);
       if(ticket == 0 || ticket == lastDeal) break;
-      if(HistoryDealGetString(ticket, DEAL_SYMBOL)  != _Symbol)       continue;
-      if(HistoryDealGetInteger(ticket, DEAL_MAGIC)  != MAGIC)         continue;
+      if(HistoryDealGetString(ticket, DEAL_SYMBOL)  != _Symbol)        continue;
+      if(HistoryDealGetInteger(ticket, DEAL_MAGIC)  != MAGIC)          continue;
       if(HistoryDealGetInteger(ticket, DEAL_ENTRY)  != DEAL_ENTRY_OUT) continue;
 
       lastDeal = ticket;
       double   profit    = HistoryDealGetDouble (ticket, DEAL_PROFIT);
       ulong    posID     = (ulong)HistoryDealGetInteger(ticket, DEAL_POSITION_ID);
       datetime closeTime = (datetime)HistoryDealGetInteger(ticket, DEAL_TIME);
+      string   exitReason= GetExitReason(ticket);
 
-      // Estimate RR
+      // Accumulate partial close profit; only write the trade row on final close
+      bool isPartial = (StringFind(exitReason, "Partial") >= 0);
+      if(isPartial)
+      {
+         gPartialProfit += profit;
+         lastDeal = ticket;
+         continue;
+      }
+
+      // Final close — total profit includes any previous partials
+      double totalProfit = profit + gPartialProfit;
+      gPartialProfit = 0;
+
+      // Estimate RR on total profit
       double rv = GlobalVariableCheck("ATLAS_"+IntegerToString(posID)+"_rv")
                   ? GlobalVariableGet("ATLAS_"+IntegerToString(posID)+"_rv") : 0;
-      double rr = (rv > 0 && gTrade.riskAmt > 0) ? profit / gTrade.riskAmt : 0;
+      double rr = (rv > 0 && gTrade.riskAmt > 0) ? totalProfit / gTrade.riskAmt : 0;
 
-      OnTradeClose(ticket, profit, gTrade.isLong, rr);
-      LogTradeClose(ticket, closeTime, profit, rr);
+      OnTradeClose(ticket, totalProfit, gTrade.isLong, rr);
+      LogTradeClose(ticket, closeTime, totalProfit, rr, exitReason);
 
       // Cleanup GV
       string key = "ATLAS_" + IntegerToString(posID);
@@ -3065,7 +3137,7 @@ void InitMLCSVFiles()
          gMLSignalFile = FileOpen(fname, FILE_WRITE|FILE_CSV|FILE_ANSI|FILE_COMMON, ',');
          if(gMLSignalFile != INVALID_HANDLE)
             FileWrite(gMLSignalFile,
-               "SetupID","Timestamp","Symbol","Direction",
+               "SetupID","Timestamp","DayOfWeek","Symbol","Direction",
                "WeeklyBias","DailyBias","H4Bias","H1Bias",
                "PDH_Sweep","PDL_Sweep","PWH_Sweep","PWL_Sweep",
                "Asian_Sweep","EQH_Sweep","EQL_Sweep",
@@ -3073,7 +3145,9 @@ void InitMLCSVFiles()
                "ADR_Status","PremDisc_Status","Session",
                "MarketCondition","News_Blocked",
                "ConfluenceScore","Grade",
-               "Trade_Executed","Rejected_Step","Rejected_Reason");
+               "Trade_Executed","Rejected_Step","Rejected_Reason",
+               "ATR14_Pips","ATR50_Pips","Spread_Pips","SpreadPctATR",
+               "ADX_Value","PlannedRR");
       }
       else
          FileSeek(gMLSignalFile, 0, SEEK_END);
@@ -3093,7 +3167,8 @@ void InitMLCSVFiles()
          gMLTradeFile = FileOpen(fname, FILE_WRITE|FILE_CSV|FILE_ANSI|FILE_COMMON, ',');
          if(gMLTradeFile != INVALID_HANDLE)
             FileWrite(gMLTradeFile,
-               "SetupID","Ticket","OpenTime","CloseTime","Symbol","Direction",
+               "SetupID","Ticket","OpenTime","CloseTime","DayOfWeek",
+               "Symbol","Direction",
                "EntryPrice","StopLoss","TakeProfit","LotSize","RiskPct",
                "Session","ConfluenceScore","Grade",
                "WeeklyBias","DailyBias","H4Bias","H1Bias",
@@ -3101,8 +3176,13 @@ void InitMLCSVFiles()
                "Asian_Sweep","EQH_Sweep","EQL_Sweep",
                "MSS","Displacement","FVG_Present","OB_Present",
                "ADR_Status","PremDisc_Status","MarketCondition",
-               "Profit_USD","Profit_Pct","RR_Achieved",
-               "MFE_Pips","MAE_Pips","Trade_Result");
+               "ATR14_Pips_Entry","ATR50_Pips_Entry",
+               "Spread_Pips_Entry","SpreadPctATR_Entry","ADX_Entry",
+               "Profit_USD","Profit_Pct",
+               "PlannedRR","RR_Achieved",
+               "MFE_Pips","MAE_Pips",
+               "MinutesInTrade","BarsInTrade",
+               "ExitReason","Trade_Result");
       }
       else
          FileSeek(gMLTradeFile, 0, SEEK_END);
@@ -3134,9 +3214,16 @@ void LogSignal(const string setupID, bool executed, bool bullish, const string f
       if(gPDAs[i].valid && !gPDAs[i].mitigated && gPDAs[i].bullish == bullish)
          { obPresent = true; break; }
 
+   double atr14  = ToPips(GetATRMain(1));
+   double atr50  = ToPips(GetATR50(1));
+   double spread = GetCurrentSpreadPips();
+   double adx    = GetADX(CondADXPeriod, 1);
+   double spdPct = (atr14 > 0) ? spread / atr14 * 100.0 : 0;
+
    FileWrite(gMLSignalFile,
       setupID,
       TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS),
+      DayOfWeekStr(TimeCurrent()),
       _Symbol,
       bullish ? "LONG" : "SHORT",
       BiasStr(gBias.weekly), BiasStr(gBias.daily),
@@ -3153,25 +3240,35 @@ void LogSignal(const string setupID, bool executed, bool bullish, const string f
       GetCondLabel(), YN(IsNewsBlocked()),
       IntegerToString(gScore.total), GradeStr(gCurGrade),
       YN(executed),
-      CSVSafe(failStep), CSVSafe(failReason));
+      CSVSafe(failStep), CSVSafe(failReason),
+      DoubleToString(atr14,  2),
+      DoubleToString(atr50,  2),
+      DoubleToString(spread, 2),
+      DoubleToString(spdPct, 2),
+      DoubleToString(adx,    2),
+      DoubleToString(TP3_RR, 2));
 }
 
-void LogTradeClose(ulong ticket, datetime closeTime, double profit, double rr)
+void LogTradeClose(ulong ticket, datetime closeTime, double profit, double rr, const string exitReason)
 {
    if(!EnableMLExport || !MLExportTrades) return;
    if(gMLTradeFile == INVALID_HANDLE) return;
 
-   double bal      = AccountInfoDouble(ACCOUNT_BALANCE);
-   double profPct  = (bal > 0) ? profit / bal * 100.0 : 0;
-   string result   = (profit >  0.001) ? "WIN"
-                   : (profit < -0.001) ? "LOSS"
-                   :                     "BREAKEVEN";
+   double bal         = AccountInfoDouble(ACCOUNT_BALANCE);
+   double profPct     = (bal > 0) ? profit / bal * 100.0 : 0;
+   string result      = (profit >  0.001) ? "WIN"
+                      : (profit < -0.001) ? "LOSS"
+                      :                     "BREAKEVEN";
+   long   minInTrade  = (long)((closeTime - gTrade.openTime) / 60);
+   int    barsInTrade = (int)(minInTrade / PeriodSeconds(PERIOD_M15) * 60);
+   double spdPctATR   = (gTrade.snapATR14 > 0) ? gTrade.snapSpread / gTrade.snapATR14 * 100.0 : 0;
 
    FileWrite(gMLTradeFile,
       gTrade.setupID,
       IntegerToString((long)ticket),
       TimeToString(gTrade.openTime, TIME_DATE|TIME_SECONDS),
       TimeToString(closeTime,       TIME_DATE|TIME_SECONDS),
+      DayOfWeekStr(gTrade.openTime),
       _Symbol,
       gTrade.isLong ? "LONG" : "SHORT",
       DoubleToString(gTrade.entryPrice, _Digits),
@@ -3191,11 +3288,20 @@ void LogTradeClose(ulong ticket, datetime closeTime, double profit, double rr)
       YN(gTrade.snapFVGPresent), YN(gTrade.snapOBPresent),
       CSVSafe(gTrade.snapADR), CSVSafe(gTrade.snapPD),
       CSVSafe(gTrade.snapCond),
-      DoubleToString(profit,         2),
-      DoubleToString(profPct,        4),
-      DoubleToString(rr,             3),
-      DoubleToString(gTrade.mfePips, 1),
-      DoubleToString(gTrade.maePips, 1),
+      DoubleToString(gTrade.snapATR14,  2),
+      DoubleToString(gTrade.snapATR50,  2),
+      DoubleToString(gTrade.snapSpread, 2),
+      DoubleToString(spdPctATR,         2),
+      DoubleToString(gTrade.snapADX,    2),
+      DoubleToString(profit,            2),
+      DoubleToString(profPct,           4),
+      DoubleToString(TP3_RR,            2),
+      DoubleToString(rr,                3),
+      DoubleToString(gTrade.mfePips,    1),
+      DoubleToString(gTrade.maePips,    1),
+      IntegerToString(minInTrade),
+      IntegerToString(barsInTrade),
+      exitReason,
       result);
 }
 
@@ -3356,9 +3462,10 @@ int OnInit()
    ParseNewsTimes();
 
    gATR14 = iATR(_Symbol, PERIOD_M15, 14);
+   gATR50 = iATR(_Symbol, PERIOD_M15, 50);
    gADX14 = iADX(_Symbol, PERIOD_M15, CondADXPeriod);
 
-   if(gATR14 == INVALID_HANDLE || gADX14 == INVALID_HANDLE)
+   if(gATR14 == INVALID_HANDLE || gATR50 == INVALID_HANDLE || gADX14 == INVALID_HANDLE)
    { Alert(EA_NAME + ": Indicator init failed"); return INIT_FAILED; }
 
    Trade.SetExpertMagicNumber(MAGIC);
@@ -3391,6 +3498,7 @@ void OnDeinit(const int reason)
 {
    CloseMLCSVFiles();
    if(gATR14 != INVALID_HANDLE) IndicatorRelease(gATR14);
+   if(gATR50 != INVALID_HANDLE) IndicatorRelease(gATR50);
    if(gADX14 != INVALID_HANDLE) IndicatorRelease(gADX14);
    DeleteAllDrawings();
    DeletePanel();
