@@ -3133,7 +3133,7 @@ void InitMLCSVFiles()
    if(!EnableMLExport) return;
    // In Strategy Tester, always create a fresh file so backtest data is never
    // mixed with live-session rows that may exist from a prior run.
-   bool isTester = (bool)MQLInfoInteger(MQL5_TESTER);
+   bool isTester = (bool)MQLInfoInteger(MQL_TESTER);
 
    if(MLExportSignals)
    {
