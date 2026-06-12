@@ -586,6 +586,7 @@ datetime      gLastBarD1   = 0;
 datetime      gLastBarW1   = 0;
 datetime      gLastTradeClose = 0;
 int           gLastTradeDay   = -1;
+int           gLastTradeWeek  = -1;  // Weekly reset tracker
 
 // Indicator handles
 int           gATR14    = INVALID_HANDLE;
@@ -1972,9 +1973,20 @@ void InitRiskState()
 
 void UpdateRiskState()
 {
-   // Check daily reset
    MqlDateTime now;
    TimeToStruct(TimeCurrent(), now);
+
+   // Weekly reset — fires on Monday (day_of_week==1) when the ISO week changes
+   int weekNum = now.year * 54 + (int)(now.day_of_year / 7);
+   if(weekNum != gLastTradeWeek)
+   {
+      gLastTradeWeek           = weekNum;
+      gRisk.weeklyStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+      gRisk.weeklyPnL          = 0;
+      gRisk.weeklyR            = 0;
+   }
+
+   // Daily reset
    if(now.day_of_year != gLastTradeDay)
    {
       gLastTradeDay            = now.day_of_year;
@@ -3152,8 +3164,11 @@ void InitMLCSVFiles()
 
       if(gMLSignalFile == INVALID_HANDLE)
       {
-         // Tester: always overwrite; Live: create if missing
-         gMLSignalFile = FileOpen(fname, FILE_WRITE|FILE_CSV|FILE_ANSI|FILE_COMMON, ',');
+         // Tester: local MQL5\Files (FILE_COMMON blocked in agent sandbox)
+         // Live:   Terminal Common\Files (FILE_COMMON allowed)
+         int flags = isTester ? (FILE_WRITE|FILE_CSV|FILE_ANSI)
+                              : (FILE_WRITE|FILE_CSV|FILE_ANSI|FILE_COMMON);
+         gMLSignalFile = FileOpen(fname, flags, ',');
       }
       if(gMLSignalFile != INVALID_HANDLE && needHeader)
          FileWrite(gMLSignalFile,
@@ -3192,8 +3207,11 @@ void InitMLCSVFiles()
 
       if(gMLTradeFile == INVALID_HANDLE)
       {
-         // Tester: always overwrite; Live: create if missing
-         gMLTradeFile = FileOpen(fname, FILE_WRITE|FILE_CSV|FILE_ANSI|FILE_COMMON, ',');
+         // Tester: local MQL5\Files (FILE_COMMON blocked in agent sandbox)
+         // Live:   Terminal Common\Files (FILE_COMMON allowed)
+         int flags = isTester ? (FILE_WRITE|FILE_CSV|FILE_ANSI)
+                              : (FILE_WRITE|FILE_CSV|FILE_ANSI|FILE_COMMON);
+         gMLTradeFile = FileOpen(fname, flags, ',');
       }
       if(gMLTradeFile != INVALID_HANDLE && needHeader)
          FileWrite(gMLTradeFile,
@@ -3508,7 +3526,8 @@ int OnInit()
 
    MqlDateTime now;
    TimeToStruct(TimeCurrent(), now);
-   gLastTradeDay = now.day_of_year;
+   gLastTradeDay  = now.day_of_year;
+   gLastTradeWeek = now.year * 54 + (int)(now.day_of_year / 7);
 
    Print("══════════════════════════════════════════════");
    Print(EA_NAME, " — ICT 2022 Mentorship Institutional Grade");
