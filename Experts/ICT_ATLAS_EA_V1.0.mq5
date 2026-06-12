@@ -208,6 +208,13 @@ input double CondADXChoppy       = 18.0;   // ADX threshold below = choppy
 input bool   BlockShortInBullTrend = false; // Block SHORT trades in strong bullish trending market
 input double BullTrendADXMin     = 30.0;   // Min ADX to consider "strong bull trend" for short blocking
 
+//--- PHASE 1C FILTERS --------------------------------------------
+input group "══════════ [P1C] EDGE VALIDATION FILTERS ══════════"
+input bool   RequirePremDiscAlign = false; // [P1C] Require PREMIUM zone for LONG, DISCOUNT zone for SHORT
+input bool   BlockLondonHours     = false; // [P1C] Block all entries during London killzone hours
+input bool   BlockShortInTrend    = false; // [P1C] Block SHORT trades when TRENDING + ADX >= TrendShortADXMin
+input double TrendShortADXMin     = 25.0;  // [P1C] Min ADX to trigger BlockShortInTrend
+
 //--- SPREAD / SLIPPAGE -------------------------------------------
 input group "══════════ [15-16] SPREAD & SLIPPAGE FILTERS ══════════"
 input int    MaxSpreadPips       = 50;     // Max spread (pips) — 0 = no check
@@ -466,6 +473,13 @@ struct SScoreCard
    int   total;
    string failReasons[15];
    int    failCount;
+   // P1C: hard-block flag — mandatory filter failed, bypass MinScore check
+   bool  hardBlock;
+   // P1C: auxiliary ML alignment scores (not part of total)
+   int   h4Align;    // H4 vs trade dir: +1=confirm, 0=neutral, -1=oppose
+   int   h1Align;    // H1 vs trade dir
+   int   obScore;    // OB present for direction: 0 or 1
+   int   condScore;  // market condition ordinal: 0=CHOPPY, 1=RANGING, 2=TRENDING
 };
 
 struct SRiskState
@@ -520,6 +534,11 @@ struct SActiveTrade
    int  snapScoreWeekly, snapScoreDaily, snapScoreLiqSweep, snapScoreMSS;
    int  snapScoreDisp, snapScoreFVG, snapScoreKillzone, snapScoreSMT;
    int  snapScoreADR, snapScorePO3, snapScorePremDisc;
+   // P1C: auxiliary ML alignment snaps
+   int  snapH4Align;   // H4 alignment vs direction (+1/0/-1)
+   int  snapH1Align;   // H1 alignment vs direction
+   int  snapOBScore;   // OB present (0/1)
+   int  snapCondScore; // market condition ordinal (0=CHOPPY,1=RANGING,2=TRENDING)
    // Trade outcome flags (populated at close time)
    bool tp3Hit;       // TP3 runner fully hit (TakeProfit exit)
    bool trailActive;  // Trade closed by trailing stop
@@ -1842,6 +1861,11 @@ void CalcConfluenceScore(bool bullish)
    gScore.premDisc      = 0;
    gScore.total         = 0;
    gScore.failCount     = 0;
+   gScore.hardBlock     = false;
+   gScore.h4Align       = 0;
+   gScore.h1Align       = 0;
+   gScore.obScore       = 0;
+   gScore.condScore     = 0;
 
    bool aggrMode     = AggressiveMode || ScalperMode;
    bool sweepPresent = gSweepDone && gSweepBull == bullish;
@@ -1884,7 +1908,11 @@ void CalcConfluenceScore(bool bullish)
       gScore.mss = ScoreMSS;
    else if(aggrMode && AggrMSSOptional && sweepPresent)
       gScore.mss = ScoreMSS / 2;   // aggressive: sweep confirmed, MSS pending = half credit
-   else AddFailReason("MSS: Not confirmed");
+   else
+   {
+      AddFailReason("MSS: Not confirmed");
+      if(UseMSSFilter) gScore.hardBlock = true;  // mandatory filter — hard block regardless of score
+   }
 
    // Displacement — relaxed thresholds in aggressive mode
    bool dispMatch = gDisp.valid && gDisp.bullish == bullish;
@@ -1934,10 +1962,42 @@ void CalcConfluenceScore(bool bullish)
       gScore.premDisc = ScorePremDisc;
    else AddFailReason("P/D: Not in " + (bullish ? "Discount" : "Premium"));
 
+   // [P1C] P/D Alignment: LONG requires PREMIUM, SHORT requires DISCOUNT
+   if(RequirePremDiscAlign)
+   {
+      bool pdAligned = bullish ? InPremium() : InDiscount();
+      if(!pdAligned)
+      {
+         AddFailReason("P/D Align: " + (bullish ? "LONG needs PREMIUM" : "SHORT needs DISCOUNT"));
+         gScore.hardBlock = true;
+      }
+   }
+
+   // [P1C] Block SHORT trades in TRENDING market
+   if(BlockShortInTrend && !bullish && gCond.valid &&
+      gCond.condition == COND_TRENDING && gCond.adxValue >= TrendShortADXMin)
+   {
+      AddFailReason("SHORT blocked: TRENDING + ADX=" + DoubleToString(gCond.adxValue,1) +
+                    " >= " + DoubleToString(TrendShortADXMin,1));
+      gScore.hardBlock = true;
+   }
+
    gScore.total = gScore.weeklyBias + gScore.dailyBias + gScore.liqSweep +
                   gScore.mss + gScore.displacement + gScore.fvg +
                   gScore.killzone + gScore.smt + gScore.adrScore +
                   gScore.po3 + gScore.premDisc;
+
+   // [P1C] Auxiliary ML alignment scores (not part of total, logged for ML analysis)
+   gScore.h4Align = (gBias.h4 == (bullish ? BIAS_BULLISH : BIAS_BEARISH)) ?  1
+                  : (gBias.h4 == BIAS_NEUTRAL)                             ?  0 : -1;
+   gScore.h1Align = (gBias.h1 == (bullish ? BIAS_BULLISH : BIAS_BEARISH)) ?  1
+                  : (gBias.h1 == BIAS_NEUTRAL)                             ?  0 : -1;
+   gScore.obScore = 0;
+   for(int _oi = 0; _oi < gPDACount; _oi++)
+      if(gPDAs[_oi].valid && !gPDAs[_oi].mitigated && gPDAs[_oi].bullish == bullish)
+         { gScore.obScore = 1; break; }
+   gScore.condScore = (gCond.condition == COND_TRENDING) ? 2
+                    : (gCond.condition == COND_RANGING)  ? 1 : 0;
 }
 
 ENUM_ATLAS_GRADE CalcGrade(int score)
@@ -2113,6 +2173,9 @@ bool ValidateSetup(bool bullish)
 
    CalcConfluenceScore(bullish);
    gCurGrade = CalcGrade(gScore.total);
+
+   // [P1C] Hard blocks — mandatory filters that bypass MinScore check
+   if(gScore.hardBlock) return false;
 
    // Score threshold — mode-dependent
    int minScoreNow = MinScore;
@@ -2305,6 +2368,10 @@ bool PlaceTrade(bool bullish)
    gTrade.snapScoreADR      = gScore.adrScore;
    gTrade.snapScorePO3      = gScore.po3;
    gTrade.snapScorePremDisc = gScore.premDisc;
+   gTrade.snapH4Align       = gScore.h4Align;
+   gTrade.snapH1Align       = gScore.h1Align;
+   gTrade.snapOBScore       = gScore.obScore;
+   gTrade.snapCondScore     = gScore.condScore;
    // Outcome flags reset on open
    gTrade.tp3Hit     = false;
    gTrade.trailActive= false;
@@ -3217,7 +3284,8 @@ void InitMLCSVFiles()
             "ADX_Value","PlannedRR",
             "Score_Weekly","Score_Daily","Score_LiqSweep","Score_MSS",
             "Score_Displacement","Score_FVG","Score_Killzone","Score_SMT",
-            "Score_ADR","Score_PO3","Score_PremDisc");
+            "Score_ADR","Score_PO3","Score_PremDisc",
+            "Score_H4Align","Score_H1Align","OB_Score","Cond_Score");
 
       if(gMLSignalFile == INVALID_HANDLE)
          Print("ATLAS ML: Cannot open signal file — ", fname);
@@ -3249,28 +3317,29 @@ void InitMLCSVFiles()
          gMLTradeFile = FileOpen(fname, flags, ',');
       }
       if(gMLTradeFile != INVALID_HANDLE && needHeader)
-         FileWrite(gMLTradeFile,
-            "SetupID","Ticket","OpenTime","CloseTime","DayOfWeek",
-            "Symbol","Direction",
-            "EntryPrice","StopLoss","TakeProfit","LotSize","RiskPct",
-            "Session","ConfluenceScore","Grade",
-            "WeeklyBias","DailyBias","H4Bias","H1Bias",
-            "PDH_Sweep","PDL_Sweep","PWH_Sweep","PWL_Sweep",
-            "Asian_Sweep","EQH_Sweep","EQL_Sweep",
-            "MSS","Displacement","FVG_Present","OB_Present",
-            "ADR_Status","PremDisc_Status","MarketCondition",
-            "ATR14_Pips_Entry","ATR50_Pips_Entry",
-            "Spread_Pips_Entry","SpreadPctATR_Entry","ADX_Entry",
-            "Profit_USD","Profit_Pct",
-            "PlannedRR","RR_Achieved",
-            "MFE_Pips","MAE_Pips",
-            "MinutesInTrade","BarsInTrade",
-            "ExitReason","Trade_Result",
-            "Score_Weekly","Score_Daily","Score_LiqSweep","Score_MSS",
-            "Score_Displacement","Score_FVG","Score_Killzone","Score_SMT",
-            "Score_ADR","Score_PO3","Score_PremDisc",
-            "TP1_Hit","TP2_Hit","TP3_Hit",
-            "BreakEven_Triggered");
+         FileWriteString(gMLTradeFile,
+            "SetupID,Ticket,OpenTime,CloseTime,DayOfWeek,"
+            "Symbol,Direction,"
+            "EntryPrice,StopLoss,TakeProfit,LotSize,RiskPct,"
+            "Session,ConfluenceScore,Grade,"
+            "WeeklyBias,DailyBias,H4Bias,H1Bias,"
+            "PDH_Sweep,PDL_Sweep,PWH_Sweep,PWL_Sweep,"
+            "Asian_Sweep,EQH_Sweep,EQL_Sweep,"
+            "MSS,Displacement,FVG_Present,OB_Present,"
+            "ADR_Status,PremDisc_Status,MarketCondition,"
+            "ATR14_Pips_Entry,ATR50_Pips_Entry,"
+            "Spread_Pips_Entry,SpreadPctATR_Entry,ADX_Entry,"
+            "Profit_USD,Profit_Pct,"
+            "PlannedRR,RR_Achieved,"
+            "MFE_Pips,MAE_Pips,"
+            "MinutesInTrade,BarsInTrade,"
+            "ExitReason,Trade_Result,"
+            "Score_Weekly,Score_Daily,Score_LiqSweep,Score_MSS,"
+            "Score_Displacement,Score_FVG,Score_Killzone,Score_SMT,"
+            "Score_ADR,Score_PO3,Score_PremDisc,"
+            "TP1_Hit,TP2_Hit,TP3_Hit,"
+            "BreakEven_Triggered,"
+            "Score_H4Align,Score_H1Align,OB_Score,Cond_Score\r\n");
 
       if(gMLTradeFile == INVALID_HANDLE)
          Print("ATLAS ML: Cannot open trade file — ", fname);
@@ -3343,7 +3412,11 @@ void LogSignal(const string setupID, bool executed, bool bullish, const string f
       IntegerToString(gScore.smt),
       IntegerToString(gScore.adrScore),
       IntegerToString(gScore.po3),
-      IntegerToString(gScore.premDisc));
+      IntegerToString(gScore.premDisc),
+      IntegerToString(gScore.h4Align),
+      IntegerToString(gScore.h1Align),
+      IntegerToString(gScore.obScore),
+      IntegerToString(gScore.condScore));
 }
 
 void LogTradeClose(ulong ticket, datetime closeTime, double profit, double rr, const string exitReason)
@@ -3360,61 +3433,75 @@ void LogTradeClose(ulong ticket, datetime closeTime, double profit, double rr, c
    int    barsInTrade = (int)(minInTrade / PeriodSeconds(PERIOD_M15) * 60);
    double spdPctATR   = (gTrade.snapATR14 > 0) ? gTrade.snapSpread / gTrade.snapATR14 * 100.0 : 0;
 
-   FileWrite(gMLTradeFile,
-      gTrade.setupID,
-      IntegerToString((long)ticket),
-      TimeToString(gTrade.openTime, TIME_DATE|TIME_SECONDS),
-      TimeToString(closeTime,       TIME_DATE|TIME_SECONDS),
-      DayOfWeekStr(gTrade.openTime),
-      _Symbol,
-      gTrade.isLong ? "LONG" : "SHORT",
-      DoubleToString(gTrade.entryPrice, _Digits),
-      DoubleToString(gTrade.sl,         _Digits),
-      DoubleToString(gTrade.tp3,        _Digits),
-      DoubleToString(gTrade.lot,        2),
-      DoubleToString(RiskPercent,       2),
-      SessionCSV(gTrade.session),
-      IntegerToString(gTrade.score), GradeStr(gTrade.grade),
-      BiasStr(gTrade.snapWeekly), BiasStr(gTrade.snapDaily),
-      BiasStr(gTrade.snapH4),     BiasStr(gTrade.snapH1),
-      YN(gTrade.snapPDHSwept), YN(gTrade.snapPDLSwept),
-      YN(gTrade.snapPWHSwept), YN(gTrade.snapPWLSwept),
-      YN(gTrade.snapAsianSwept),
-      YN(gTrade.snapEQHSwept), YN(gTrade.snapEQLSwept),
-      YN(gTrade.snapMSS), YN(gTrade.snapDisp),
-      YN(gTrade.snapFVGPresent), YN(gTrade.snapOBPresent),
-      CSVSafe(gTrade.snapADR), CSVSafe(gTrade.snapPD),
-      CSVSafe(gTrade.snapCond),
-      DoubleToString(gTrade.snapATR14,  2),
-      DoubleToString(gTrade.snapATR50,  2),
-      DoubleToString(gTrade.snapSpread, 2),
-      DoubleToString(spdPctATR,         2),
-      DoubleToString(gTrade.snapADX,    2),
-      DoubleToString(profit,            2),
-      DoubleToString(profPct,           4),
-      DoubleToString(TP3_RR,            2),
-      DoubleToString(rr,                3),
-      DoubleToString(gTrade.mfePips,    1),
-      DoubleToString(gTrade.maePips,    1),
-      IntegerToString(minInTrade),
-      IntegerToString(barsInTrade),
-      exitReason,
-      result,
-      IntegerToString(gTrade.snapScoreWeekly),
-      IntegerToString(gTrade.snapScoreDaily),
-      IntegerToString(gTrade.snapScoreLiqSweep),
-      IntegerToString(gTrade.snapScoreMSS),
-      IntegerToString(gTrade.snapScoreDisp),
-      IntegerToString(gTrade.snapScoreFVG),
-      IntegerToString(gTrade.snapScoreKillzone),
-      IntegerToString(gTrade.snapScoreSMT),
-      IntegerToString(gTrade.snapScoreADR),
-      IntegerToString(gTrade.snapScorePO3),
-      IntegerToString(gTrade.snapScorePremDisc),
-      YN(gTrade.tp1Hit),
-      YN(gTrade.tp2Hit),
-      YN(gTrade.tp3Hit),
-      YN(gTrade.beSet));
+   string _row =
+      gTrade.setupID                                    + "," +
+      IntegerToString((long)ticket)                     + "," +
+      TimeToString(gTrade.openTime, TIME_DATE|TIME_SECONDS) + "," +
+      TimeToString(closeTime,       TIME_DATE|TIME_SECONDS) + "," +
+      DayOfWeekStr(gTrade.openTime)                     + "," +
+      _Symbol                                           + "," +
+      (gTrade.isLong ? "LONG" : "SHORT")                + "," +
+      DoubleToString(gTrade.entryPrice, _Digits)        + "," +
+      DoubleToString(gTrade.sl,         _Digits)        + "," +
+      DoubleToString(gTrade.tp3,        _Digits)        + "," +
+      DoubleToString(gTrade.lot,        2)              + "," +
+      DoubleToString(RiskPercent,       2)              + "," +
+      SessionCSV(gTrade.session)                        + "," +
+      IntegerToString(gTrade.score)                     + "," +
+      GradeStr(gTrade.grade)                            + "," +
+      BiasStr(gTrade.snapWeekly)                        + "," +
+      BiasStr(gTrade.snapDaily)                         + "," +
+      BiasStr(gTrade.snapH4)                            + "," +
+      BiasStr(gTrade.snapH1)                            + "," +
+      YN(gTrade.snapPDHSwept)                           + "," +
+      YN(gTrade.snapPDLSwept)                           + "," +
+      YN(gTrade.snapPWHSwept)                           + "," +
+      YN(gTrade.snapPWLSwept)                           + "," +
+      YN(gTrade.snapAsianSwept)                         + "," +
+      YN(gTrade.snapEQHSwept)                           + "," +
+      YN(gTrade.snapEQLSwept)                           + "," +
+      YN(gTrade.snapMSS)                                + "," +
+      YN(gTrade.snapDisp)                               + "," +
+      YN(gTrade.snapFVGPresent)                         + "," +
+      YN(gTrade.snapOBPresent)                          + "," +
+      CSVSafe(gTrade.snapADR)                           + "," +
+      CSVSafe(gTrade.snapPD)                            + "," +
+      CSVSafe(gTrade.snapCond)                          + "," +
+      DoubleToString(gTrade.snapATR14,  2)              + "," +
+      DoubleToString(gTrade.snapATR50,  2)              + "," +
+      DoubleToString(gTrade.snapSpread, 2)              + "," +
+      DoubleToString(spdPctATR,         2)              + "," +
+      DoubleToString(gTrade.snapADX,    2)              + "," +
+      DoubleToString(profit,            2)              + "," +
+      DoubleToString(profPct,           4)              + "," +
+      DoubleToString(TP3_RR,            2)              + "," +
+      DoubleToString(rr,                3)              + "," +
+      DoubleToString(gTrade.mfePips,    1)              + "," +
+      DoubleToString(gTrade.maePips,    1)              + "," +
+      IntegerToString(minInTrade)                       + "," +
+      IntegerToString(barsInTrade)                      + "," +
+      exitReason                                        + "," +
+      result                                            + "," +
+      IntegerToString(gTrade.snapScoreWeekly)           + "," +
+      IntegerToString(gTrade.snapScoreDaily)            + "," +
+      IntegerToString(gTrade.snapScoreLiqSweep)         + "," +
+      IntegerToString(gTrade.snapScoreMSS)              + "," +
+      IntegerToString(gTrade.snapScoreDisp)             + "," +
+      IntegerToString(gTrade.snapScoreFVG)              + "," +
+      IntegerToString(gTrade.snapScoreKillzone)         + "," +
+      IntegerToString(gTrade.snapScoreSMT)              + "," +
+      IntegerToString(gTrade.snapScoreADR)              + "," +
+      IntegerToString(gTrade.snapScorePO3)              + "," +
+      IntegerToString(gTrade.snapScorePremDisc)         + "," +
+      YN(gTrade.tp1Hit)                                 + "," +
+      YN(gTrade.tp2Hit)                                 + "," +
+      YN(gTrade.tp3Hit)                                 + "," +
+      YN(gTrade.beSet)                                  + "," +
+      IntegerToString(gTrade.snapH4Align)               + "," +
+      IntegerToString(gTrade.snapH1Align)               + "," +
+      IntegerToString(gTrade.snapOBScore)               + "," +
+      IntegerToString(gTrade.snapCondScore)             + "\r\n";
+   FileWriteString(gMLTradeFile, _row);
 }
 
 //===================================================================
@@ -3460,6 +3547,14 @@ void CheckForEntry()
 {
    if(!CanTrade()) return;
    if(!gRisk.tradingAllowed) return;
+
+   // [P1C] Block all new entries during London killzone hours
+   if(BlockLondonHours)
+   {
+      MqlDateTime _ldt;
+      TimeToStruct(TimeCurrent(), _ldt);
+      if(_ldt.hour >= LondonStartHour && _ldt.hour < LondonEndHour) return;
+   }
 
    static datetime lastCountedBar = 0;
    datetime curBar = iTime(_Symbol, PERIOD_M15, 0);
