@@ -731,12 +731,43 @@ param_row(ws, r, "ExpandKillzones", "bool", "false",
     "Asian session quality is lower for Gold — expect more false signals.",
     "false strict mode. true to expand trading hours"); r += 1
 
+spacer(ws, r); r += 1
+section_hdr(ws, r, "[28]", "ML DATA COLLECTION"); r += 1
+param_row(ws, r, "EnableMLExport", "bool", "true",
+    "Master switch for ML data export.\n"
+    "When true, the EA writes two CSV files:\n"
+    "  ICT_ATLAS_All_Signals_SYMBOL.csv — every signal evaluated (pass & fail)\n"
+    "  ICT_ATLAS_Trade_History_SYMBOL.csv — every completed trade with MFE/MAE\n"
+    "Files are written to MT5 common files folder for easy Python/Excel access.",
+    "true recommended — low overhead, invaluable for backtesting analysis"); r += 1
+param_row(ws, r, "MLExportSignals", "bool", "true",
+    "Export all signals including rejected ones to ICT_ATLAS_All_Signals_SYMBOL.csv.\n"
+    "Each row = one M15 bar evaluation with:\n"
+    "  • All bias readings (Weekly/Daily/H4/H1)\n"
+    "  • Sweep status (PDH/PDL/PWH/PWL/Asian/EQH/EQL)\n"
+    "  • MSS, Displacement, FVG, OB status\n"
+    "  • ADR, P/D, Session, Market Condition, News filter\n"
+    "  • Confluence Score, Grade, Trade_Executed, rejection step & reason\n"
+    "Use to identify which filters block the most setups and which improve win rate.",
+    "true recommended for ML analysis"); r += 1
+param_row(ws, r, "MLExportTrades", "bool", "true",
+    "Export completed trades to ICT_ATLAS_Trade_History_SYMBOL.csv.\n"
+    "Each row = one closed trade with:\n"
+    "  • Full entry context snapshot (bias, sweeps, MSS, FVG, OB, ADR, P/D)\n"
+    "  • Entry, SL, TP, Lot, Risk%, Session, Score, Grade\n"
+    "  • Profit $, Profit %, RR Achieved\n"
+    "  • MFE (maximum favorable excursion in pips)\n"
+    "  • MAE (maximum adverse excursion in pips)\n"
+    "  • Trade Result: WIN / LOSS / BREAKEVEN\n"
+    "Use to train ML models (Random Forest, XGBoost, LightGBM) for setup quality prediction.",
+    "true recommended — essential for future ML analysis"); r += 1
+
 # Footer
 spacer(ws, r); r += 1
 ws.row_dimensions[r].height = 18
 ws.merge_cells(f"A{r}:F{r}")
 c = ws.cell(row=r, column=1,
-            value="  ★  All sections covered: SYMBOL PRESET → [28] DEBUG & RELAXED MODE  ·  Total: 95+ parameters  ★")
+            value="  ★  All sections covered: SYMBOL PRESET → [28] ML DATA COLLECTION  ·  Total: 98+ parameters  ★")
 c.fill = fill("1A1030"); c.font = font(FG_GOLD, italic=True, size=9)
 c.alignment = align("center"); c.border = thin_border()
 
@@ -879,6 +910,12 @@ acct_row(r2, "RequireWeeklyBias (HF)", "[01]", "—", "—", "false", "false"); 
 acct_row(r2, "RequireDailyBias (HF)", "[01]", "—", "—", "false", "false"); r2 += 1
 acct_row(r2, "SessionAsian (HF)", "[08]", "—", "—", "true", "true"); r2 += 1
 acct_row(r2, "Expected WR (estimate)", "—", "—", "—", "45–55%", "45–55%"); r2 += 1
+s2_spacer(r2); r2 += 1
+
+acct_section(r2, "ML Data Collection — Recommended: ALWAYS ON"); r2 += 1
+acct_row(r2, "EnableMLExport", "[28]", "true", "true", "true", "true"); r2 += 1
+acct_row(r2, "MLExportSignals", "[28]", "true", "true", "true", "true"); r2 += 1
+acct_row(r2, "MLExportTrades", "[28]", "true", "true", "true", "true"); r2 += 1
 s2_spacer(r2); r2 += 1
 
 # Notes

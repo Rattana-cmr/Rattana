@@ -327,6 +327,12 @@ input bool   AggrStrictKillzone  = false;  // Require killzone in aggressive mod
 input bool   AllowContinuation   = true;   // Allow continuation trades (no sweep required when in strong trend)
 input bool   ExpandKillzones     = false;  // Expand killzone windows by 2h each side
 input bool   ScalperMode         = false;  // Scalper mode (very relaxed, M1/M5 structure)
+
+//--- ML DATA COLLECTION ------------------------------------------
+input group "══════════ [28] ML DATA COLLECTION ══════════"
+input bool   EnableMLExport      = true;   // Enable ML data export to CSV
+input bool   MLExportSignals     = true;   // Export all signals (incl. rejected)
+input bool   MLExportTrades      = true;   // Export completed trade history
 input int    ScalperMinScore     = 40;     // Min score in scalper mode
 
 //===================================================================
@@ -493,6 +499,17 @@ struct SActiveTrade
    ENUM_ATLAS_GRADE   grade;
    int      score;
    datetime openTime;
+   double   lot;
+   // MFE/MAE (updated each tick while position is open)
+   double   mfePips;
+   double   maePips;
+   // Signal context snapshot (for trade history CSV)
+   ENUM_ATLAS_BIAS snapWeekly, snapDaily, snapH4, snapH1;
+   bool  snapPDHSwept, snapPDLSwept, snapPWHSwept, snapPWLSwept;
+   bool  snapAsianSwept, snapEQHSwept, snapEQLSwept;
+   bool  snapMSS, snapDisp, snapFVGPresent, snapOBPresent;
+   string snapADR, snapPD, snapCond;
+   bool  snapNewsBlocked;
 };
 
 struct STradeStats
@@ -629,6 +646,11 @@ int           gRejSLSize  = 0;
 int           gRejScore   = 0;
 int           gRejOther   = 0;
 string        gLastRejectReason = "";
+
+// ML data collection
+int           gMLSignalFile  = INVALID_HANDLE;
+int           gMLTradeFile   = INVALID_HANDLE;
+datetime      gLastSignalBar = 0;
 
 //===================================================================
 // SECTION 5 — UTILITY FUNCTIONS
@@ -2184,6 +2206,32 @@ bool PlaceTrade(bool bullish)
    gTrade.score     = gScore.total;
    gTrade.openTime  = TimeCurrent();
    gTrade.model     = gSweepBull ? "PDL+MSS+FVG" : "PDH+MSS+FVG";
+   gTrade.lot       = lot;
+   // MFE/MAE reset
+   gTrade.mfePips   = 0;
+   gTrade.maePips   = 0;
+   // Signal snapshot for trade history CSV
+   gTrade.snapWeekly     = gBias.weekly;
+   gTrade.snapDaily      = gBias.daily;
+   gTrade.snapH4         = gBias.h4;
+   gTrade.snapH1         = gBias.h1;
+   gTrade.snapPDHSwept   = WasTagSwept("PDH");
+   gTrade.snapPDLSwept   = WasTagSwept("PDL");
+   gTrade.snapPWHSwept   = WasTagSwept("PWH");
+   gTrade.snapPWLSwept   = WasTagSwept("PWL");
+   gTrade.snapAsianSwept = WasTagSwept("AsianH") || WasTagSwept("AsianL");
+   gTrade.snapEQHSwept   = WasTagSwept("EQH");
+   gTrade.snapEQLSwept   = WasTagSwept("EQL");
+   gTrade.snapMSS        = gMSS.valid;
+   gTrade.snapDisp       = gDisp.valid;
+   bool _fvg=false; for(int _i=0;_i<gFVGCount;_i++) if(gFVGs[_i].valid&&!gFVGs[_i].mitigated&&gFVGs[_i].bullish==bullish){_fvg=true;break;}
+   bool _ob=false;  for(int _i=0;_i<gPDACount;_i++) if(gPDAs[_i].valid&&!gPDAs[_i].mitigated&&gPDAs[_i].bullish==bullish){_ob=true;break;}
+   gTrade.snapFVGPresent = _fvg;
+   gTrade.snapOBPresent  = _ob;
+   gTrade.snapADR        = GetADRLabel();
+   gTrade.snapPD         = GetPDLabel();
+   gTrade.snapCond       = GetCondLabel();
+   gTrade.snapNewsBlocked= IsNewsBlocked();
 
    string key = "ATLAS_" + IntegerToString(ticket);
    GlobalVariableSet(key + "_tp1",  tp1);
@@ -2221,6 +2269,15 @@ void ManageTrades()
       double sl     = PositionGetDouble(POSITION_SL);
       double curP   = isLong ? SymbolInfoDouble(_Symbol, SYMBOL_BID)
                              : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+
+      // MFE / MAE tracking
+      if(gTrade.ticket == ticket)
+      {
+         double favor = ToPips(isLong ? curP - entry : entry - curP);
+         double adver = ToPips(isLong ? entry - curP : curP - entry);
+         if(favor > gTrade.mfePips) gTrade.mfePips = favor;
+         if(adver > gTrade.maePips) gTrade.maePips = adver;
+      }
 
       string key   = "ATLAS_" + IntegerToString(ticket);
       bool   haveGV= GlobalVariableCheck(key + "_tp1");
@@ -2897,8 +2954,9 @@ void OnTrade()
       if(HistoryDealGetInteger(ticket, DEAL_ENTRY)  != DEAL_ENTRY_OUT) continue;
 
       lastDeal = ticket;
-      double profit = HistoryDealGetDouble(ticket, DEAL_PROFIT);
-      ulong  posID  = (ulong)HistoryDealGetInteger(ticket, DEAL_POSITION_ID);
+      double   profit    = HistoryDealGetDouble (ticket, DEAL_PROFIT);
+      ulong    posID     = (ulong)HistoryDealGetInteger(ticket, DEAL_POSITION_ID);
+      datetime closeTime = (datetime)HistoryDealGetInteger(ticket, DEAL_TIME);
 
       // Estimate RR
       double rv = GlobalVariableCheck("ATLAS_"+IntegerToString(posID)+"_rv")
@@ -2906,6 +2964,7 @@ void OnTrade()
       double rr = (rv > 0 && gTrade.riskAmt > 0) ? profit / gTrade.riskAmt : 0;
 
       OnTradeClose(ticket, profit, gTrade.isLong, rr);
+      LogTradeClose(ticket, closeTime, profit, rr);
 
       // Cleanup GV
       string key = "ATLAS_" + IntegerToString(posID);
@@ -2915,6 +2974,223 @@ void OnTrade()
       GlobalVariableDel(key+"_be");  GlobalVariableDel(key+"_long");
       break;
    }
+}
+
+//===================================================================
+// SECTION 31 — ML DATA COLLECTION ENGINE
+//===================================================================
+
+bool WasTagSwept(const string tag)
+{
+   for(int i = 0; i < gLiqCount; i++)
+      if(gLiqLevels[i].tag == tag && gLiqLevels[i].swept) return true;
+   return false;
+}
+
+string GetPDLabel()
+{
+   if(gDRHigh <= gDRLow) return "UNKNOWN";
+   double pct = (SymbolInfoDouble(_Symbol, SYMBOL_BID) - gDRLow) / (gDRHigh - gDRLow);
+   if(pct >= (1.0 - PremiumZone)) return "PREMIUM";
+   if(pct <= DiscountZone)        return "DISCOUNT";
+   return "EQUILIBRIUM";
+}
+
+string GetADRLabel()   { return gADR.blocked ? "BLOCKED" : "OK"; }
+
+string GetCondLabel()
+{
+   switch(gCond.condition)
+   {
+      case COND_TRENDING: return "TRENDING";
+      case COND_RANGING:  return "RANGING";
+      default:            return "CHOPPY";
+   }
+}
+
+string SessionCSV(ENUM_ATLAS_SESSION s)
+{
+   switch(s)
+   {
+      case SES_LONDON:  return "LONDON";
+      case SES_NEWYORK: return "NEWYORK";
+      case SES_ASIAN:   return "ASIAN";
+      default:          return "NONE";
+   }
+}
+
+string YN(bool b)     { return b ? "YES" : "NO"; }
+
+string CSVSafe(const string s)
+{
+   string r = s;
+   StringReplace(r, ",",  ";");
+   StringReplace(r, "\"", "'");
+   StringReplace(r, "\n", " ");
+   return r;
+}
+
+string GetRejectedStep(const string reason)
+{
+   if(StringFind(reason,"Liquidity")>=0||StringFind(reason,"Sweep")>=0) return "SWEEP";
+   if(StringFind(reason,"MSS")      >=0) return "MSS";
+   if(StringFind(reason,"Disp")     >=0) return "DISPLACEMENT";
+   if(StringFind(reason,"FVG")      >=0) return "FVG";
+   if(StringFind(reason,"Kill")     >=0||StringFind(reason,"session")>=0) return "SESSION";
+   if(StringFind(reason,"ADR")      >=0) return "ADR";
+   if(StringFind(reason,"P/D")      >=0) return "PD_ARRAY";
+   if(StringFind(reason,"Score")    >=0) return "SCORE";
+   if(StringFind(reason,"Grade")    >=0) return "GRADE";
+   if(StringFind(reason,"Bias")     >=0) return "BIAS";
+   if(StringFind(reason,"News")     >=0) return "NEWS";
+   if(StringFind(reason,"Condition")>=0) return "MARKET_CONDITION";
+   if(StringFind(reason,"SL t")     >=0) return "SL_SIZE";
+   return "OTHER";
+}
+
+void InitMLCSVFiles()
+{
+   if(!EnableMLExport) return;
+
+   if(MLExportSignals)
+   {
+      string fname = "ICT_ATLAS_All_Signals_" + _Symbol + ".csv";
+      gMLSignalFile = FileOpen(fname, FILE_READ|FILE_WRITE|FILE_CSV|FILE_ANSI|FILE_COMMON, ',');
+      if(gMLSignalFile == INVALID_HANDLE)
+      {
+         gMLSignalFile = FileOpen(fname, FILE_WRITE|FILE_CSV|FILE_ANSI|FILE_COMMON, ',');
+         if(gMLSignalFile != INVALID_HANDLE)
+            FileWrite(gMLSignalFile,
+               "Timestamp","Symbol","Direction",
+               "WeeklyBias","DailyBias","H4Bias","H1Bias",
+               "PDH_Sweep","PDL_Sweep","PWH_Sweep","PWL_Sweep",
+               "Asian_Sweep","EQH_Sweep","EQL_Sweep",
+               "MSS","Displacement","FVG_Present","OB_Present",
+               "ADR_Status","PremDisc_Status","Session",
+               "MarketCondition","News_Blocked",
+               "ConfluenceScore","Grade",
+               "Trade_Executed","Rejected_Step","Rejected_Reason");
+      }
+      else
+         FileSeek(gMLSignalFile, 0, SEEK_END);
+
+      if(gMLSignalFile == INVALID_HANDLE)
+         Print("ATLAS ML: Cannot open signal file — ", fname);
+      else
+         Print("ATLAS ML: Signal log → ", fname);
+   }
+
+   if(MLExportTrades)
+   {
+      string fname = "ICT_ATLAS_Trade_History_" + _Symbol + ".csv";
+      gMLTradeFile = FileOpen(fname, FILE_READ|FILE_WRITE|FILE_CSV|FILE_ANSI|FILE_COMMON, ',');
+      if(gMLTradeFile == INVALID_HANDLE)
+      {
+         gMLTradeFile = FileOpen(fname, FILE_WRITE|FILE_CSV|FILE_ANSI|FILE_COMMON, ',');
+         if(gMLTradeFile != INVALID_HANDLE)
+            FileWrite(gMLTradeFile,
+               "Ticket","OpenTime","CloseTime","Symbol","Direction",
+               "EntryPrice","StopLoss","TakeProfit","LotSize","RiskPct",
+               "Session","ConfluenceScore","Grade",
+               "WeeklyBias","DailyBias","H4Bias","H1Bias",
+               "PDH_Sweep","PDL_Sweep","PWH_Sweep","PWL_Sweep",
+               "Asian_Sweep","EQH_Sweep","EQL_Sweep",
+               "MSS","Displacement","FVG_Present","OB_Present",
+               "ADR_Status","PremDisc_Status","MarketCondition",
+               "Profit_USD","Profit_Pct","RR_Achieved",
+               "MFE_Pips","MAE_Pips","Trade_Result");
+      }
+      else
+         FileSeek(gMLTradeFile, 0, SEEK_END);
+
+      if(gMLTradeFile == INVALID_HANDLE)
+         Print("ATLAS ML: Cannot open trade file — ", fname);
+      else
+         Print("ATLAS ML: Trade log → ", fname);
+   }
+}
+
+void CloseMLCSVFiles()
+{
+   if(gMLSignalFile != INVALID_HANDLE) { FileClose(gMLSignalFile); gMLSignalFile = INVALID_HANDLE; }
+   if(gMLTradeFile  != INVALID_HANDLE) { FileClose(gMLTradeFile);  gMLTradeFile  = INVALID_HANDLE; }
+}
+
+void LogSignal(bool executed, bool bullish, const string failStep, const string failReason)
+{
+   if(!EnableMLExport || !MLExportSignals) return;
+   if(gMLSignalFile == INVALID_HANDLE) return;
+
+   bool fvgPresent = false;
+   for(int i = 0; i < gFVGCount; i++)
+      if(gFVGs[i].valid && !gFVGs[i].mitigated && gFVGs[i].bullish == bullish)
+         { fvgPresent = true; break; }
+   bool obPresent = false;
+   for(int i = 0; i < gPDACount; i++)
+      if(gPDAs[i].valid && !gPDAs[i].mitigated && gPDAs[i].bullish == bullish)
+         { obPresent = true; break; }
+
+   FileWrite(gMLSignalFile,
+      TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS),
+      _Symbol,
+      bullish ? "LONG" : "SHORT",
+      BiasStr(gBias.weekly), BiasStr(gBias.daily),
+      BiasStr(gBias.h4),     BiasStr(gBias.h1),
+      YN(WasTagSwept("PDH")), YN(WasTagSwept("PDL")),
+      YN(WasTagSwept("PWH")), YN(WasTagSwept("PWL")),
+      YN(WasTagSwept("AsianH") || WasTagSwept("AsianL")),
+      YN(WasTagSwept("EQH")),  YN(WasTagSwept("EQL")),
+      YN(gMSS.valid  && gMSS.bullish  == bullish),
+      YN(gDisp.valid && gDisp.bullish == bullish),
+      YN(fvgPresent), YN(obPresent),
+      GetADRLabel(), GetPDLabel(),
+      SessionCSV(GetCurrentSession()),
+      GetCondLabel(), YN(IsNewsBlocked()),
+      IntegerToString(gScore.total), GradeStr(gCurGrade),
+      YN(executed),
+      CSVSafe(failStep), CSVSafe(failReason));
+}
+
+void LogTradeClose(ulong ticket, datetime closeTime, double profit, double rr)
+{
+   if(!EnableMLExport || !MLExportTrades) return;
+   if(gMLTradeFile == INVALID_HANDLE) return;
+
+   double bal      = AccountInfoDouble(ACCOUNT_BALANCE);
+   double profPct  = (bal > 0) ? profit / bal * 100.0 : 0;
+   string result   = (profit >  0.001) ? "WIN"
+                   : (profit < -0.001) ? "LOSS"
+                   :                     "BREAKEVEN";
+
+   FileWrite(gMLTradeFile,
+      IntegerToString((long)ticket),
+      TimeToString(gTrade.openTime, TIME_DATE|TIME_SECONDS),
+      TimeToString(closeTime,       TIME_DATE|TIME_SECONDS),
+      _Symbol,
+      gTrade.isLong ? "LONG" : "SHORT",
+      DoubleToString(gTrade.entryPrice, _Digits),
+      DoubleToString(gTrade.sl,         _Digits),
+      DoubleToString(gTrade.tp3,        _Digits),
+      DoubleToString(gTrade.lot,        2),
+      DoubleToString(RiskPercent,       2),
+      SessionCSV(gTrade.session),
+      IntegerToString(gTrade.score), GradeStr(gTrade.grade),
+      BiasStr(gTrade.snapWeekly), BiasStr(gTrade.snapDaily),
+      BiasStr(gTrade.snapH4),     BiasStr(gTrade.snapH1),
+      YN(gTrade.snapPDHSwept), YN(gTrade.snapPDLSwept),
+      YN(gTrade.snapPWHSwept), YN(gTrade.snapPWLSwept),
+      YN(gTrade.snapAsianSwept),
+      YN(gTrade.snapEQHSwept), YN(gTrade.snapEQLSwept),
+      YN(gTrade.snapMSS), YN(gTrade.snapDisp),
+      YN(gTrade.snapFVGPresent), YN(gTrade.snapOBPresent),
+      CSVSafe(gTrade.snapADR), CSVSafe(gTrade.snapPD),
+      CSVSafe(gTrade.snapCond),
+      DoubleToString(profit,         2),
+      DoubleToString(profPct,        4),
+      DoubleToString(rr,             3),
+      DoubleToString(gTrade.mfePips, 1),
+      DoubleToString(gTrade.maePips, 1),
+      result);
 }
 
 //===================================================================
@@ -2995,6 +3271,12 @@ void CheckForEntry()
                           preferBull?"BULL":"BEAR", " Score=", gScore.total,
                           " Chk=", gDailyChecked, " Rej=", gDailyRejected,
                           " Exec=", gDailyExec);
+      if(isNewBar)
+      {
+         string rejStep   = placed ? "" : GetRejectedStep(gLastRejectReason);
+         string rejReason = placed ? "" : gLastRejectReason;
+         LogSignal(placed, preferBull, rejStep, rejReason);
+      }
       return;
    }
 
@@ -3012,6 +3294,12 @@ void CheckForEntry()
       if(!placed) { gSetupReady = false; if(isNewBar) gDailyRejected++; }
       if(DebugLogs) Print("SETUP ", placed?"EXECUTED":"REJECTED", " (COUNTER): ",
                           !preferBull?"BULL":"BEAR", " Score=", gScore.total);
+      if(isNewBar)
+      {
+         string rejStep   = placed ? "" : GetRejectedStep(gLastRejectReason);
+         string rejReason = placed ? "" : gLastRejectReason;
+         LogSignal(placed, !preferBull, rejStep, rejReason);
+      }
       return;
    }
 
@@ -3022,13 +3310,20 @@ void CheckForEntry()
    gSetupReady = false;
    if(primaryScore.failCount > 0) TrackRejection(primaryScore.failReasons[0]);
 
-   if(DebugLogs && isNewBar)
+   if(isNewBar)
    {
       lastCountedBar = curBar;
-      string reasons = "";
-      for(int i = 0; i < MathMin(gScore.failCount, 4); i++)
-         reasons += " | " + gScore.failReasons[i];
-      Print("SETUP REJECTED: Score=", gScore.total, reasons);
+      string step   = primaryScore.failCount > 0 ? GetRejectedStep(primaryScore.failReasons[0]) : "NONE";
+      string reason = primaryScore.failCount > 0 ? primaryScore.failReasons[0] : "No setup";
+      LogSignal(false, preferBull, step, reason);
+
+      if(DebugLogs)
+      {
+         string reasons = "";
+         for(int i = 0; i < MathMin(gScore.failCount, 4); i++)
+            reasons += " | " + gScore.failReasons[i];
+         Print("SETUP REJECTED: Score=", gScore.total, reasons);
+      }
    }
 }
 
@@ -3071,11 +3366,14 @@ int OnInit()
    Print("Risk: ", RiskPercent, "% | Min Score: ", MinScore, " | Grades: ", EnumToString(AllowedGrades));
    Print("══════════════════════════════════════════════");
 
+   InitMLCSVFiles();
+
    return INIT_SUCCEEDED;
 }
 
 void OnDeinit(const int reason)
 {
+   CloseMLCSVFiles();
    if(gATR14 != INVALID_HANDLE) IndicatorRelease(gATR14);
    if(gADX14 != INVALID_HANDLE) IndicatorRelease(gADX14);
    DeleteAllDrawings();
