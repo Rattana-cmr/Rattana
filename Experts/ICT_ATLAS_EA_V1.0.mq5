@@ -3002,55 +3002,59 @@ string GetExitReason(ulong ticket)
    }
 }
 
-void OnTrade()
+// Works in both Strategy Tester (OnTrade doesn't fire) and live trading.
+// Called every tick from OnTick(); OnTrade() is kept as a thin live-trading alias.
+void CheckForClosedTrades()
 {
-   if(!HistorySelect(TimeCurrent() - 86400, TimeCurrent())) return;
-   static ulong lastDeal = 0;
+   if(gTrade.ticket == 0) return;
+   if(PositionSelectByTicket(gTrade.ticket)) return; // Position still open
 
-   for(int i = HistoryDealsTotal() - 1; i >= 0; i--)
+   // Retrieve all deals that belong to this position
+   if(!HistorySelectByPosition(gTrade.ticket)) return;
+
+   double   accProfit   = 0;
+   ulong    finalDeal   = 0;
+   datetime finalTime   = 0;
+   string   finalReason = "";
+
+   for(int i = 0; i < HistoryDealsTotal(); i++)
    {
-      ulong ticket = HistoryDealGetTicket(i);
-      if(ticket == 0 || ticket == lastDeal) break;
-      if(HistoryDealGetString(ticket, DEAL_SYMBOL)  != _Symbol)        continue;
-      if(HistoryDealGetInteger(ticket, DEAL_MAGIC)  != MAGIC)          continue;
-      if(HistoryDealGetInteger(ticket, DEAL_ENTRY)  != DEAL_ENTRY_OUT) continue;
+      ulong dk = HistoryDealGetTicket(i);
+      if(dk == 0) continue;
+      if(HistoryDealGetInteger(dk, DEAL_ENTRY) != DEAL_ENTRY_OUT) continue;
 
-      lastDeal = ticket;
-      double   profit    = HistoryDealGetDouble (ticket, DEAL_PROFIT);
-      ulong    posID     = (ulong)HistoryDealGetInteger(ticket, DEAL_POSITION_ID);
-      datetime closeTime = (datetime)HistoryDealGetInteger(ticket, DEAL_TIME);
-      string   exitReason= GetExitReason(ticket);
+      double profit = HistoryDealGetDouble(dk, DEAL_PROFIT);
+      string reason = GetExitReason(dk);
 
-      // Accumulate partial close profit; only write the trade row on final close
-      bool isPartial = (StringFind(exitReason, "Partial") >= 0);
-      if(isPartial)
+      accProfit += profit; // Accumulates partials + final close
+      if(StringFind(reason, "Partial") < 0) // Final (non-partial) close
       {
-         gPartialProfit += profit;
-         lastDeal = ticket;
-         continue;
+         finalDeal   = dk;
+         finalTime   = (datetime)HistoryDealGetInteger(dk, DEAL_TIME);
+         finalReason = reason;
       }
-
-      // Final close — total profit includes any previous partials
-      double totalProfit = profit + gPartialProfit;
-      gPartialProfit = 0;
-
-      // Estimate RR on total profit
-      double rv = GlobalVariableCheck("ATLAS_"+IntegerToString(posID)+"_rv")
-                  ? GlobalVariableGet("ATLAS_"+IntegerToString(posID)+"_rv") : 0;
-      double rr = (rv > 0 && gTrade.riskAmt > 0) ? totalProfit / gTrade.riskAmt : 0;
-
-      OnTradeClose(ticket, totalProfit, gTrade.isLong, rr);
-      LogTradeClose(ticket, closeTime, totalProfit, rr, exitReason);
-
-      // Cleanup GV
-      string key = "ATLAS_" + IntegerToString(posID);
-      GlobalVariableDel(key+"_tp1"); GlobalVariableDel(key+"_tp2");
-      GlobalVariableDel(key+"_tp3"); GlobalVariableDel(key+"_rv");
-      GlobalVariableDel(key+"_t1h"); GlobalVariableDel(key+"_t2h");
-      GlobalVariableDel(key+"_be");  GlobalVariableDel(key+"_long");
-      break;
    }
+
+   if(finalDeal == 0) return;
+
+   double rv = GlobalVariableCheck("ATLAS_"+IntegerToString(gTrade.ticket)+"_rv")
+               ? GlobalVariableGet("ATLAS_"+IntegerToString(gTrade.ticket)+"_rv") : 0;
+   double rr = (rv > 0 && gTrade.riskAmt > 0) ? accProfit / gTrade.riskAmt : 0;
+
+   OnTradeClose(finalDeal, accProfit, gTrade.isLong, rr);
+   LogTradeClose(finalDeal, finalTime, accProfit, rr, finalReason);
+
+   // Cleanup per-position GlobalVariables
+   string key = "ATLAS_" + IntegerToString(gTrade.ticket);
+   GlobalVariableDel(key+"_tp1"); GlobalVariableDel(key+"_tp2");
+   GlobalVariableDel(key+"_tp3"); GlobalVariableDel(key+"_rv");
+   GlobalVariableDel(key+"_t1h"); GlobalVariableDel(key+"_t2h");
+   GlobalVariableDel(key+"_be");  GlobalVariableDel(key+"_long");
+
+   gTrade.ticket = 0; // Prevent double-logging on subsequent ticks
 }
+
+void OnTrade() { CheckForClosedTrades(); }
 
 //===================================================================
 // SECTION 31 — ML DATA COLLECTION ENGINE
@@ -3127,70 +3131,93 @@ string GetRejectedStep(const string reason)
 void InitMLCSVFiles()
 {
    if(!EnableMLExport) return;
+   // In Strategy Tester, always create a fresh file so backtest data is never
+   // mixed with live-session rows that may exist from a prior run.
+   bool isTester = (bool)MQLInfoInteger(MQL5_TESTER);
 
    if(MLExportSignals)
    {
       string fname = "ICT_ATLAS_All_Signals_" + _Symbol + ".csv";
-      gMLSignalFile = FileOpen(fname, FILE_READ|FILE_WRITE|FILE_CSV|FILE_ANSI|FILE_COMMON, ',');
+      bool needHeader = isTester;
+
+      if(!isTester)
+      {
+         // Live: append to existing file
+         gMLSignalFile = FileOpen(fname, FILE_READ|FILE_WRITE|FILE_CSV|FILE_ANSI|FILE_COMMON, ',');
+         if(gMLSignalFile != INVALID_HANDLE)
+            FileSeek(gMLSignalFile, 0, SEEK_END);
+         else
+            needHeader = true; // File didn't exist — write header below
+      }
+
       if(gMLSignalFile == INVALID_HANDLE)
       {
+         // Tester: always overwrite; Live: create if missing
          gMLSignalFile = FileOpen(fname, FILE_WRITE|FILE_CSV|FILE_ANSI|FILE_COMMON, ',');
-         if(gMLSignalFile != INVALID_HANDLE)
-            FileWrite(gMLSignalFile,
-               "SetupID","Timestamp","DayOfWeek","Symbol","Direction",
-               "WeeklyBias","DailyBias","H4Bias","H1Bias",
-               "PDH_Sweep","PDL_Sweep","PWH_Sweep","PWL_Sweep",
-               "Asian_Sweep","EQH_Sweep","EQL_Sweep",
-               "MSS","Displacement","FVG_Present","OB_Present",
-               "ADR_Status","PremDisc_Status","Session",
-               "MarketCondition","News_Blocked",
-               "ConfluenceScore","Grade",
-               "Trade_Executed","Rejected_Step","Rejected_Reason",
-               "ATR14_Pips","ATR50_Pips","Spread_Pips","SpreadPctATR",
-               "ADX_Value","PlannedRR");
       }
-      else
-         FileSeek(gMLSignalFile, 0, SEEK_END);
+      if(gMLSignalFile != INVALID_HANDLE && needHeader)
+         FileWrite(gMLSignalFile,
+            "SetupID","Timestamp","DayOfWeek","Symbol","Direction",
+            "WeeklyBias","DailyBias","H4Bias","H1Bias",
+            "PDH_Sweep","PDL_Sweep","PWH_Sweep","PWL_Sweep",
+            "Asian_Sweep","EQH_Sweep","EQL_Sweep",
+            "MSS","Displacement","FVG_Present","OB_Present",
+            "ADR_Status","PremDisc_Status","Session",
+            "MarketCondition","News_Blocked",
+            "ConfluenceScore","Grade",
+            "Trade_Executed","Rejected_Step","Rejected_Reason",
+            "ATR14_Pips","ATR50_Pips","Spread_Pips","SpreadPctATR",
+            "ADX_Value","PlannedRR");
 
       if(gMLSignalFile == INVALID_HANDLE)
          Print("ATLAS ML: Cannot open signal file — ", fname);
       else
-         Print("ATLAS ML: Signal log → ", fname);
+         Print("ATLAS ML: Signal log → ", fname, isTester ? " [BACKTEST-FRESH]" : " [LIVE-APPEND]");
    }
 
    if(MLExportTrades)
    {
       string fname = "ICT_ATLAS_Trade_History_" + _Symbol + ".csv";
-      gMLTradeFile = FileOpen(fname, FILE_READ|FILE_WRITE|FILE_CSV|FILE_ANSI|FILE_COMMON, ',');
+      bool needHeader = isTester;
+
+      if(!isTester)
+      {
+         // Live: append to existing file
+         gMLTradeFile = FileOpen(fname, FILE_READ|FILE_WRITE|FILE_CSV|FILE_ANSI|FILE_COMMON, ',');
+         if(gMLTradeFile != INVALID_HANDLE)
+            FileSeek(gMLTradeFile, 0, SEEK_END);
+         else
+            needHeader = true;
+      }
+
       if(gMLTradeFile == INVALID_HANDLE)
       {
+         // Tester: always overwrite; Live: create if missing
          gMLTradeFile = FileOpen(fname, FILE_WRITE|FILE_CSV|FILE_ANSI|FILE_COMMON, ',');
-         if(gMLTradeFile != INVALID_HANDLE)
-            FileWrite(gMLTradeFile,
-               "SetupID","Ticket","OpenTime","CloseTime","DayOfWeek",
-               "Symbol","Direction",
-               "EntryPrice","StopLoss","TakeProfit","LotSize","RiskPct",
-               "Session","ConfluenceScore","Grade",
-               "WeeklyBias","DailyBias","H4Bias","H1Bias",
-               "PDH_Sweep","PDL_Sweep","PWH_Sweep","PWL_Sweep",
-               "Asian_Sweep","EQH_Sweep","EQL_Sweep",
-               "MSS","Displacement","FVG_Present","OB_Present",
-               "ADR_Status","PremDisc_Status","MarketCondition",
-               "ATR14_Pips_Entry","ATR50_Pips_Entry",
-               "Spread_Pips_Entry","SpreadPctATR_Entry","ADX_Entry",
-               "Profit_USD","Profit_Pct",
-               "PlannedRR","RR_Achieved",
-               "MFE_Pips","MAE_Pips",
-               "MinutesInTrade","BarsInTrade",
-               "ExitReason","Trade_Result");
       }
-      else
-         FileSeek(gMLTradeFile, 0, SEEK_END);
+      if(gMLTradeFile != INVALID_HANDLE && needHeader)
+         FileWrite(gMLTradeFile,
+            "SetupID","Ticket","OpenTime","CloseTime","DayOfWeek",
+            "Symbol","Direction",
+            "EntryPrice","StopLoss","TakeProfit","LotSize","RiskPct",
+            "Session","ConfluenceScore","Grade",
+            "WeeklyBias","DailyBias","H4Bias","H1Bias",
+            "PDH_Sweep","PDL_Sweep","PWH_Sweep","PWL_Sweep",
+            "Asian_Sweep","EQH_Sweep","EQL_Sweep",
+            "MSS","Displacement","FVG_Present","OB_Present",
+            "ADR_Status","PremDisc_Status","MarketCondition",
+            "ATR14_Pips_Entry","ATR50_Pips_Entry",
+            "Spread_Pips_Entry","SpreadPctATR_Entry","ADX_Entry",
+            "Profit_USD","Profit_Pct",
+            "PlannedRR","RR_Achieved",
+            "MFE_Pips","MAE_Pips",
+            "MinutesInTrade","BarsInTrade",
+            "ExitReason","Trade_Result");
 
       if(gMLTradeFile == INVALID_HANDLE)
          Print("ATLAS ML: Cannot open trade file — ", fname);
       else
-         Print("ATLAS ML: Trade log → ", fname);
+         Print("ATLAS ML: Trade log → ", fname, isTester ? " [BACKTEST-FRESH]" : " [LIVE-APPEND]");
    }
 }
 
@@ -3220,10 +3247,11 @@ void LogSignal(const string setupID, bool executed, bool bullish, const string f
    double adx    = GetADX(CondADXPeriod, 1);
    double spdPct = (atr14 > 0) ? spread / atr14 * 100.0 : 0;
 
+   datetime barTime = iTime(_Symbol, PERIOD_M15, 0);
    FileWrite(gMLSignalFile,
       setupID,
-      TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS),
-      DayOfWeekStr(TimeCurrent()),
+      TimeToString(barTime, TIME_DATE|TIME_SECONDS),
+      DayOfWeekStr(barTime),
       _Symbol,
       bullish ? "LONG" : "SHORT",
       BiasStr(gBias.weekly), BiasStr(gBias.daily),
@@ -3552,6 +3580,7 @@ void OnTick()
 
    // Every tick
    ManageTrades();
+   CheckForClosedTrades();
    CheckFridayClose();
    CheckForEntry();
    UpdatePanel();
