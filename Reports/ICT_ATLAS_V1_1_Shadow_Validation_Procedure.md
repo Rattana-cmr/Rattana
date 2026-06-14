@@ -32,26 +32,60 @@ No trades are skipped in shadow mode. Every trade that would have been taken und
 
 ---
 
+## Two Validation Tracks
+
+The shadow validation runs in parallel across two data streams:
+
+| Track | Data source | Signal volume | Statistical power | Purpose |
+|-------|------------|--------------|-------------------|---------|
+| **All-signals** (rapid) | All Atlas signals, ATR-labeled | ~2,880/yr | High — significance in 2–4 months | Early discrimination evidence |
+| **Executed-trades** (primary) | Phase 1D-B trade history | ~42/yr | Low — significance in 14+ months | Gate activation criterion |
+
+The all-signals track does not replace the executed-trade criterion. It provides fast confidence that the model is not broken in live conditions, reducing the risk of waiting 14 months before learning the gate doesn't work.
+
+---
+
 ## Monthly Scoring Procedure
 
-After exporting the updated trade CSV from MT5:
-
 ```bash
-# 1. Export trade history from MT5 as CSV (same format as existing)
-#    Save to: ML/data/ICT_ATLAS_Phase1DB_Trades.csv
+# ── Step 1: Export from MT5 ──────────────────────────────────────
+# A. Export All Signals CSV (ICT_ATLAS_All_Signals_XAUUSD.csv) — already logging live
+# B. Run ExportBars.mq5 on XAUUSD M15 chart → XAUUSD_M15_Bars.csv
+#    (drag script onto XAUUSD M15 chart in MT5, copy file to ML/data/)
 
-# 2. Run the shadow scorer
-python ML/scripts/shadow_score.py
+# ── Step 2: Label new signals (for all-signals track) ────────────
+python ML/scripts/label_signals.py \
+  --signals ML/data/ICT_ATLAS_All_Signals_XAUUSD.csv \
+  --bars    ML/data/XAUUSD_M15_Bars.csv \
+  --output  ML/data/ICT_ATLAS_Forward_Signals_Labeled.csv
 
-# 3. Review report in: ML/outputs/research_v2/shadow/shadow_summary.csv
-# 4. Record results in the Monthly Log table below
+# ── Step 3a: All-signals track (rapid) ───────────────────────────
+python ML/scripts/shadow_score.py --mode signals \
+  --signals ML/data/ICT_ATLAS_Forward_Signals_Labeled.csv
+
+# ── Step 3b: Executed-trade track (primary) ───────────────────────
+# Export Trade_History CSV from MT5, save to ML/data/ICT_ATLAS_Phase1DB_Trades.csv
+python ML/scripts/shadow_score.py --mode trades
+
+# ── Step 4: Record results in Monthly Log below ───────────────────
 ```
-
-The scorer reads the trade CSV, scores each trade with the v2 LightGBM model, classifies as TAKEN (≥ 0.52) or REJECTED (< 0.52), and reports win rate and statistical significance.
 
 ---
 
 ## Success Criteria for Live Gate Activation
+
+### All-Signals Rapid Validation (must pass first)
+
+| # | Criterion | Threshold |
+|---|-----------|-----------|
+| R1 | Forward signals scored | ≥ 200 (~1 month at 2,880/yr) |
+| R2 | TAKEN win rate | > REJECTED win rate |
+| R3 | Discrimination p-value | < 0.05 |
+| R4 | TAKEN win rate | > 52% |
+
+Passing rapid validation is a prerequisite — if the model fails to discriminate on 200 signals, proceeding to executed-trade gating is not justified.
+
+### Executed-Trade Gate Activation (all four required)
 
 **All four criteria must be satisfied simultaneously before activating the ML gate.**
 
@@ -99,18 +133,18 @@ When success criteria are met, the following steps are required before live gati
 
 ---
 
-## Realistic Timeline
+## Realistic Timeline (Revised — Dual Track)
 
-At approximately 42 trades/year (Phase 1D-B forward rate):
+| Milestone | Track | Volume | Estimated Date |
+|-----------|-------|--------|---------------|
+| First all-signals scoring | All-signals | 200 signals | **~Q3 2026 (1 month)** |
+| Rapid validation complete | All-signals | 500 signals | **~Q4 2026 (2–3 months)** |
+| First executed-trade scoring | Trades | 15 trades | Q4 2026 |
+| Executed-trade minimum | Trades | 50 trades | ~Q3 2027 |
+| Gate activation possible | Trades | 50+ trades + p < 0.10 | ~Q3–Q4 2027 |
+| Phase 5 evaluation threshold | Trades | 1,000 trades | ~2039 |
 
-| Milestone | Trades | Estimated Date |
-|-----------|--------|---------------|
-| First shadow scoring | ~15 | Q4 2026 |
-| Minimum threshold reached | 50 | ~Q3 2027 |
-| Strong statistical power | 100 | ~Q3 2029 |
-| Phase 5 evaluation threshold | 1,000 | ~2039 |
-
-The 50-trade minimum is a floor for starting the statistical assessment, not a guarantee of significance. The discrimination test needs the TAKEN and REJECTED groups to be large enough — at 41% acceptance rate, 50 total trades yields ~21 TAKEN and ~29 REJECTED, which provides limited power. The p < 0.10 threshold is chosen accordingly (rather than the more standard p < 0.05) to allow earlier detection of real signal.
+**The all-signals track compresses the evidence-gathering window from 14+ months to 1–3 months.** If rapid validation passes (expected, given the in-sample results), the 14-month executed-trade wait is undertaken with high confidence rather than uncertainty.
 
 ---
 
