@@ -1,0 +1,238 @@
+; ICT ATLAS EA V1.1 — Shadow Validation Preset
+; ═══════════════════════════════════════════════════════════════════════
+; PURPOSE: Shadow validation of ML probability gate at threshold 0.52.
+;   - All Phase 1D-B strategy settings are UNCHANGED.
+;   - UseMLFilter=false  →  gate is DISABLED. All qualifying signals trade.
+;   - ML_Score is logged to CSV for offline scoring (shadow_score.py).
+;   - No live trades are filtered until gate is explicitly activated.
+;
+; STRATEGY: LONG ONLY | MSS required | London blocked | MaxSL=200 pips
+; EA VERSION: ICT_ATLAS_EA_V1.0.mq5 (compiled with V1.1 shadow inputs)
+; INSTRUMENT: XAUUSD M15 only
+;
+; SHADOW WORKFLOW:
+;   1. Deploy this preset in MT5 (XAUUSD M15, forward testing)
+;   2. Monthly: export All Signals CSV + M15 bars from MT5
+;   3. Run: python ML/scripts/label_signals.py  (labels signal outcomes)
+;   4. Run: python ML/scripts/shadow_score.py --mode signals  (all-signals rapid track)
+;   5. Run: python ML/scripts/shadow_score.py --mode trades   (executed-trade primary track)
+;   6. Record results in Reports/ICT_ATLAS_V1_1_Shadow_Validation_Procedure.md
+;
+; GATE ACTIVATION CRITERIA (do NOT enable UseMLFilter until ALL are met):
+;   Rapid track:   ≥200 forward signals, TAKEN WR > 52%, p < 0.05
+;   Primary track: ≥50 forward trades,   TAKEN WR > baseline, p < 0.10
+;
+; PHASE 1D-B PERFORMANCE BASELINE (10-year backtest 2016–2025):
+;   Net Profit: +$13,998 | PF: 2.564 | Win Rate: 56.7% | 425 trades
+; ═══════════════════════════════════════════════════════════════════════
+
+SymPreset=1                    ; XAUUSD (Gold) — only valid instrument
+
+; [01] BIAS ENGINE — unchanged from Phase 1D-B
+UseBiasEngine=false
+RequireWeeklyBias=false
+RequireDailyBias=false
+RequireH4Bias=false
+BiasSwingLookback=5
+
+; [02] LIQUIDITY ENGINE — unchanged from Phase 1D-B
+UseLiquidityEngine=false
+UseEQHEQL=true
+EQHTolerance=5.0
+LiqLookbackBars=50
+SweepWickMinPips=2
+
+; [03] MARKET STRUCTURE ENGINE — unchanged from Phase 1D-B (MSS required)
+UseMSSFilter=true
+UseBOSFilter=false
+MSSwingLookback=3
+MSSLookbackBars=30
+
+; [04] DISPLACEMENT ENGINE — unchanged from Phase 1D-B
+UseDispFilter=false
+DispMinBodyPct=0.60
+DispMinATRMulti=1.30
+DispLookbackBars=5
+
+; [05] FVG ENGINE — unchanged from Phase 1D-B
+UseFVGFilter=false
+UseFVGEntry=true
+UseIFVG=true
+UseCEentry=true
+FVGMaxAgeBars=50
+MaxFVGsTracked=20
+
+; [06] PD ARRAY ENGINE — unchanged from Phase 1D-B
+UsePDAEngine=false
+PDA_UseFVG=true
+PDA_UseIFVG=true
+PDA_UseOB=true
+PDA_UseBreaker=true
+
+; [07] PREMIUM/DISCOUNT ENGINE — unchanged from Phase 1D-B
+UsePremDiscFilter=false
+DiscountZone=0.50
+PremiumZone=0.50
+DealingRangeLookback=60
+
+; [08] SESSION & KILLZONE ENGINE — unchanged from Phase 1D-B
+UseSessionFilter=false
+BrokerGMTOffset=3
+AutoGMTOffset=false
+SessionAsian=false
+SessionLondon=false
+SessionNewYork=true
+SessionNYPM=false
+AsianStartHour=0
+AsianEndHour=7
+LondonStartHour=7
+LondonEndHour=10
+NYStartHour=13
+NYEndHour=16
+NYPMStartHour=18
+NYPMEndHour=20
+
+; [09] POWER OF 3 ENGINE — unchanged from Phase 1D-B
+UsePO3Filter=false
+PO3ManipMinPips=10.0
+
+; [10] SMT DIVERGENCE ENGINE — unchanged from Phase 1D-B
+UseSMTFilter=false
+SMTSymbol=XAGUSD
+SMTLookbackBars=5
+
+; [11] ADR FILTER — unchanged from Phase 1D-B
+UseADRFilter=true
+ADRPeriod=14
+ADRMaxPct=0.80
+
+; [12] NEWS FILTER — unchanged from Phase 1D-B
+UseNewsFilter=false
+
+; [13] MARKET CONDITION FILTER — unchanged from Phase 1D-B
+UseConditionFilter=true
+TradeInTrend=true
+TradeInRanging=true
+TradeInChoppy=true
+CondADXPeriod=14
+CondADXTrend=25.0
+CondADXChoppy=18.0
+BlockShortInBullTrend=false
+BullTrendADXMin=25.0
+
+; [14] EDGE VALIDATION — unchanged from Phase 1D-B (LONG ONLY critical setting)
+AllowShortEntries=false
+RequirePremDiscAlign=false
+BlockLondonHours=true
+BlockShortInTrend=false
+TrendShortADXMin=25.0
+
+; [15-16] SPREAD & SLIPPAGE — unchanged from Phase 1D-B
+MaxSpreadPips=50
+MaxSlippagePips=5
+
+; [17] CORRELATION FILTER — unchanged from Phase 1D-B
+UseCorrelFilter=false
+
+; [18] CONFLUENCE SCORING — unchanged from Phase 1D-B
+UseScoringSystem=true
+MinScore=30
+ScoreWeeklyBias=15
+ScoreDailyBias=15
+ScoreLiqSweep=20
+ScoreMSS=20
+ScoreDisplacement=15
+ScoreFVG=10
+ScoreKillzone=10
+ScoreSMT=5
+ScoreADR=5
+ScorePO3=5
+ScorePremDisc=5
+
+; [19] TRADE QUALITY GRADES — unchanged from Phase 1D-B
+AllowedGrades=3
+GradeAPlus=100
+GradeA=80
+GradeB=60
+
+; [22] ADVANCED TRADE MANAGEMENT — unchanged from Phase 1D-B
+TP1_RR=1.0
+TP2_RR=2.0
+TP3_RR=3.0
+TP1_ClosePct=40.0
+TP2_ClosePct=40.0
+UseBreakeven=true
+BreakevenBufferPips=5
+UseTrailingStop=false
+TrailStartPips=50
+TrailStepPips=15
+SLBufferPips=10
+MaxSLPips=200
+MinSLPips=15
+
+; [23] DAILY PROFIT LOCK — unchanged from Phase 1D-B
+UseProfitLock=true
+ProfitLock_ReduceR=3.0
+ProfitLock_StopR=5.0
+ProfitLock_ReducePct=50.0
+
+; [24] DAILY LOSS PROTECTION — unchanged from Phase 1D-B
+UseLossProtect=true
+LossProtect_ReduceR=2.0
+LossProtect_StopR=100.0
+MaxWeeklyLossR=20.0
+
+; TRADE CLOSE RULES — unchanged from Phase 1D-B
+CloseOnFriday=true
+FridayCloseHour=14
+CooldownMinutes=15
+
+; [25] RISK MANAGEMENT — unchanged from Phase 1D-B
+RiskMode=0
+RiskPercent=0.50
+FixedLotSize=0.01
+MaxLotCap=0.50
+MaxTradesPerDay=10
+MaxConsecLosses=100
+
+; [26] VISUAL CHART TOOLS
+DrawPDH_PDL=false
+DrawPWH_PWL=false
+DrawSessionRanges=false
+DrawFVGZones=false
+DrawOBZones=false
+DrawLiqSweeps=false
+DrawMSSLines=false
+DrawTargets=true
+
+; [27] DEBUG PANEL
+ShowPanel=false
+ShowStatPanel=true
+DebugLogs=false
+
+; [29] AGGRESSIVE / CONTINUATION — unchanged from Phase 1D-B
+AggressiveMode=false
+ScalperMode=false
+AllowContinuation=true
+
+; [28] ML DATA COLLECTION — ALL ENABLED (required for shadow validation)
+EnableMLExport=true
+MLExportSignals=true
+MLExportTrades=true
+
+; ═══════════════════════════════════════════════════════════════════════
+; [V1.1] ML GATE — SHADOW VALIDATION SETTINGS
+;
+; UseMLFilter=false  →  GATE DISABLED. Trading is identical to Phase 1D-B.
+;                       ML_Score is logged to CSV but does NOT filter trades.
+;
+; MLConfidenceThreshold=0.52  →  The approved threshold for live gating.
+;                                 Stored here for reference. Only active
+;                                 when UseMLFilter is changed to true.
+;
+; !! DO NOT change UseMLFilter to true until activation criteria are met !!
+; !! Criteria documented in:                                              !!
+; !! Reports/ICT_ATLAS_V1_1_Shadow_Validation_Procedure.md               !!
+; ═══════════════════════════════════════════════════════════════════════
+UseMLFilter=false
+MLConfidenceThreshold=0.52
