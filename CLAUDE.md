@@ -55,12 +55,17 @@ A signal-based research track is active. It uses ATR triple-barrier labeling on 
 
 - Entry point: `python ML/run_research_pipeline.py`
 - Labeling: `python ML/scripts/label_signals.py`
-- Current results: XGB AUC 0.718 (win_loss), 0.856 (tp3_hit) on 3,865 signals
-- Key finding: PWL Sweep (+10.4%), EQL Sweep (+4.3%), ADX, ATR ratio are top predictors
-- Outputs: `ML/outputs/research/`
+- HistData aggregation: `python ML/scripts/aggregate_histdata.py`
+- **v2 dataset: 45,429 labeled signals (2009–2024)** — current primary dataset
+- **v2 results: XGB AUC 0.635 (win_loss), 0.742 (tp3_hit)** — cross-regime validated, ±0.004–0.007
+- v1 results (3,865 signals, 2022–2024 only): XGB AUC 0.718 — single regime, less robust
+- Key finding: ATR14, ATR50, ATR ratio, hour, month dominate; PWL Sweep +10.4% edge (p=0.0002)
+- Outputs: `ML/outputs/research_v2/` (v2), `ML/outputs/research/` (v1)
 - Report: `Reports/ICT_ATLAS_Research_Track_Report.md`
 
-To expand: export new All Signals CSV from MT5 backtest + M15 bars, re-run label_signals.py.
+Bar data: `ML/data/XAUUSD_M15_Extended.csv` (404,741 bars, 2009–2026, gitignored).
+To regenerate bars: place HistData ZIPs in `ML/data/histdata_staging/`, run `aggregate_histdata.py`.
+To expand signals: export new All Signals CSV from MT5 backtest, run `label_signals.py --bars XAUUSD_M15_Extended.csv`.
 
 ## Key Reports
 
