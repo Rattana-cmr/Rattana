@@ -1,14 +1,26 @@
 """
 shadow_score.py — Offline shadow validation scorer for Atlas EA V1.1.
 
-Reads the Phase 1D-B trade export CSV, scores each trade with the v2 LightGBM
-model, and produces a shadow validation report showing what would have happened
-under the 0.52 ML gate — without changing any live trades.
+Two validation tracks:
 
-Run monthly after exporting updated trade history from MT5.
+  --mode trades   (default) Executed Phase 1D-B trades only.
+                  Reads ICT_ATLAS_Phase1DB_Trades.csv. Outcome from Trade_Result.
+                  ~42 signals/year. Clinically relevant for gate activation.
+
+  --mode signals  All Atlas signals (executed + non-executed), ATR-labeled.
+                  Reads ICT_ATLAS_Research_Signals_Labeled_v2.csv or a fresh
+                  labeled CSV from label_signals.py. ~2,880 signals/year.
+                  Provides rapid discrimination evidence (statistical significance
+                  achievable in 2–4 months vs 14+ months for trades-only track).
+
+Run monthly after exporting updated trade history and M15 bars from MT5.
 
 Usage:
-    python ML/scripts/shadow_score.py [--trades PATH] [--output PATH] [--threshold FLOAT]
+    # Executed-trade track (primary — gate activation criterion):
+    python ML/scripts/shadow_score.py --mode trades
+
+    # All-signals track (accelerated discrimination evidence):
+    python ML/scripts/shadow_score.py --mode signals --signals PATH_TO_LABELED_CSV
 """
 
 import argparse
@@ -22,9 +34,10 @@ from scipy import stats
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-MODEL_PATH = Path(__file__).parent.parent / "outputs" / "research_v2" / "models" / "LightGBM_win_loss.pkl"
-TRADES_PATH = Path(__file__).parent.parent / "data" / "ICT_ATLAS_Phase1DB_Trades.csv"
-OUTPUT_DIR  = Path(__file__).parent.parent / "outputs" / "research_v2" / "shadow"
+MODEL_PATH    = Path(__file__).parent.parent / "outputs" / "research_v2" / "models" / "LightGBM_win_loss.pkl"
+TRADES_PATH   = Path(__file__).parent.parent / "data" / "ICT_ATLAS_Phase1DB_Trades.csv"
+SIGNALS_PATH  = Path(__file__).parent.parent / "data" / "ICT_ATLAS_Research_Signals_Labeled_v2.csv"
+OUTPUT_DIR    = Path(__file__).parent.parent / "outputs" / "research_v2" / "shadow"
 
 THRESHOLD = 0.52
 
@@ -242,13 +255,116 @@ def run(trades_path: Path, output_dir: Path, threshold: float):
     print("="*60)
 
 
+def run_signals(signals_path: Path, output_dir: Path, threshold: float):
+    """All-signals shadow track: score ATR-labeled signals from label_signals.py output."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    print("\n" + "="*60)
+    print(" Atlas EA V1.1 — Shadow Validation (ALL-SIGNALS TRACK)")
+    print("="*60)
+
+    with open(MODEL_PATH, "rb") as f:
+        bundle = joblib.load(f)
+    model, scaler = bundle["model"], bundle["scaler"]
+
+    signals = pd.read_csv(signals_path)
+    print(f"\nSignals loaded: {len(signals):,}  ({signals_path.name})")
+    print(f"  Executed trades: {(signals['Trade_Executed']=='YES').sum()}")
+    print(f"  Non-executed:    {(signals['Trade_Executed']=='NO').sum()}")
+
+    # Score using the research pipeline feature builder (columns match exactly)
+    from run_research_pipeline import build_features
+    X   = build_features(signals)
+    X_s = scaler.transform(X)
+    signals["ml_score"]    = model.predict_proba(X_s)[:, 1]
+    signals["ml_decision"] = (signals["ml_score"] >= threshold).map({True: "TAKEN", False: "REJECTED"})
+    signals["outcome"]     = signals["win_loss"]   # ATR barrier win_loss label
+
+    taken    = signals[signals["ml_decision"] == "TAKEN"]
+    rejected = signals[signals["ml_decision"] == "REJECTED"]
+
+    def stats_block(subset, label):
+        if len(subset) == 0: return {}
+        wr   = subset["outcome"].mean() * 100
+        wins = int(subset["outcome"].sum())
+        gl   = len(subset) - wins
+        pf   = wins / gl if gl > 0 else float("inf")
+        exp  = subset["outcome"].apply(lambda x: 1.0 if x else -1.0).mean()
+        return {"label": label, "n": len(subset), "wins": wins, "losses": gl,
+                "win_rate": wr, "profit_factor": pf, "expectancy_r": exp}
+
+    all_s  = stats_block(signals, "All signals (no gate)")
+    take_s = stats_block(taken,   f"TAKEN (score >= {threshold})")
+    rej_s  = stats_block(rejected, f"REJECTED (score < {threshold})")
+
+    chi2, p_val = chi2_test(take_s.get("wins", 0), take_s.get("n", 0),
+                             rej_s.get("wins", 0),  rej_s.get("n", 0))
+
+    print(f"\n{'─'*60}")
+    print(f" ALL-SIGNALS SHADOW REPORT — Threshold {threshold}")
+    print(f"{'─'*60}")
+    for s in [all_s, take_s, rej_s]:
+        if not s: continue
+        print(f"\n  {s['label']}")
+        print(f"    Signals:       {s['n']:,}")
+        print(f"    Win Rate:      {s['win_rate']:.1f}%  ({s['wins']}W / {s['losses']}L)")
+        print(f"    Profit Factor: {s['profit_factor']:.3f}")
+        print(f"    Expectancy:    {s['expectancy_r']:+.3f}R")
+
+    print(f"\n  Discrimination test (TAKEN vs REJECTED win rates):")
+    print(f"    Chi2 = {chi2:.3f}   p-value = {p_val:.4f}")
+    if p_val < 0.01:
+        print(f"    *** HIGHLY SIGNIFICANT (p < 0.01)")
+    elif p_val < 0.05:
+        print(f"    **  SIGNIFICANT (p < 0.05)")
+    elif p_val < 0.10:
+        print(f"    *   MARGINAL (p < 0.10)")
+    else:
+        print(f"    NOT SIGNIFICANT — model may not be discriminating in live data")
+
+    print(f"\n  Rapid-validation criteria (all-signals track):")
+    print(f"    Signals scored:  {len(signals):,} / 200 minimum")
+    print(f"    p-value:         {p_val:.4f} (target < 0.05)")
+    if take_s.get("n", 0) > 0:
+        print(f"    TAKEN win rate:  {take_s['win_rate']:.1f}% (target > 52%)")
+
+    rapid_ok = (
+        len(signals) >= 200 and
+        p_val < 0.05 and
+        take_s.get("win_rate", 0) > 52.0
+    )
+    print(f"\n  Rapid-validation: {'✓ EVIDENCE SUFFICIENT — proceed to executed-trade gate assessment' if rapid_ok else '✗ CONTINUE ACCUMULATING'}")
+    print(f"  Note: rapid-validation supports but does not replace executed-trade gate criteria.")
+
+    out = output_dir / "shadow_signals_scored.csv"
+    signals.to_csv(out, index=False)
+
+    summary = pd.DataFrame([all_s, take_s, rej_s])
+    summary["chi2"] = chi2; summary["p_value"] = p_val
+    summary["n_total"] = len(signals); summary["threshold"] = threshold
+    summary["track"] = "all_signals"
+    out_s = output_dir / "shadow_signals_summary.csv"
+    summary.to_csv(out_s, index=False)
+
+    print(f"\n  ✓ Scored signals saved: {out.name}")
+    print(f"  ✓ Summary saved:        {out_s.name}")
+    print("="*60)
+
+
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--mode",      choices=["trades", "signals"], default="trades",
+                        help="trades=executed trades only (gate activation); signals=all labeled signals (rapid validation)")
     parser.add_argument("--trades",    type=Path, default=TRADES_PATH)
+    parser.add_argument("--signals",   type=Path, default=SIGNALS_PATH)
     parser.add_argument("--output",    type=Path, default=OUTPUT_DIR)
     parser.add_argument("--threshold", type=float, default=THRESHOLD)
     args = parser.parse_args()
-    run(args.trades, args.output, args.threshold)
+
+    if args.mode == "signals":
+        run_signals(args.signals, args.output, args.threshold)
+    else:
+        run(args.trades, args.output, args.threshold)
 
 
 if __name__ == "__main__":

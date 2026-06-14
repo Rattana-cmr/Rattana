@@ -345,6 +345,11 @@ input bool   MLExportSignals     = true;   // Export all signals (incl. rejected
 input bool   MLExportTrades      = true;   // Export completed trade history
 input int    ScalperMinScore     = 40;     // Min score in scalper mode
 
+//--- ML GATE (V1.1) — shadow logging only, gate disabled until ONNX integrated ----
+input group "══════════ [29] ML GATE V1.1 (SHADOW) ══════════"
+input bool   UseMLFilter           = false;  // [V1.1] Activate ML gate (false=shadow log only, gate disabled)
+input double MLConfidenceThreshold = 0.52;   // [V1.1] Min probability to take trade (active only when UseMLFilter=true)
+
 //===================================================================
 // SECTION 3 — DATA STRUCTURES
 //===================================================================
@@ -3286,7 +3291,8 @@ void InitMLCSVFiles()
             "Score_Weekly","Score_Daily","Score_LiqSweep","Score_MSS",
             "Score_Displacement","Score_FVG","Score_Killzone","Score_SMT",
             "Score_ADR","Score_PO3","Score_PremDisc",
-            "Score_H4Align","Score_H1Align","OB_Score","Cond_Score");
+            "Score_H4Align","Score_H1Align","OB_Score","Cond_Score",
+            "ML_Score","ML_Decision","ML_Threshold");
 
       if(gMLSignalFile == INVALID_HANDLE)
          Print("ATLAS ML: Cannot open signal file — ", fname);
@@ -3340,7 +3346,8 @@ void InitMLCSVFiles()
             "Score_ADR,Score_PO3,Score_PremDisc,"
             "TP1_Hit,TP2_Hit,TP3_Hit,"
             "BreakEven_Triggered,"
-            "Score_H4Align,Score_H1Align,OB_Score,Cond_Score\r\n");
+            "Score_H4Align,Score_H1Align,OB_Score,Cond_Score,"
+            "ML_Score,ML_Decision,ML_Threshold\r\n");
 
       if(gMLTradeFile == INVALID_HANDLE)
          Print("ATLAS ML: Cannot open trade file — ", fname);
@@ -3417,7 +3424,10 @@ void LogSignal(const string setupID, bool executed, bool bullish, const string f
       IntegerToString(gScore.h4Align),
       IntegerToString(gScore.h1Align),
       IntegerToString(gScore.obScore),
-      IntegerToString(gScore.condScore));
+      IntegerToString(gScore.condScore),
+      "0.000",           // ML_Score — populated offline by shadow_score.py; real-time in V1.1 live gate
+      "SHADOW",          // ML_Decision — SHADOW=not yet scored; TAKEN/REJECTED when gate is active
+      DoubleToString(MLConfidenceThreshold, 2));
 }
 
 void LogTradeClose(ulong ticket, datetime closeTime, double profit, double rr, const string exitReason)
@@ -3501,7 +3511,10 @@ void LogTradeClose(ulong ticket, datetime closeTime, double profit, double rr, c
       IntegerToString(gTrade.snapH4Align)               + "," +
       IntegerToString(gTrade.snapH1Align)               + "," +
       IntegerToString(gTrade.snapOBScore)               + "," +
-      IntegerToString(gTrade.snapCondScore)             + "\r\n";
+      IntegerToString(gTrade.snapCondScore)             + "," +
+      "0.000"                                           + "," +  // ML_Score — offline shadow; real-time in live gate
+      "SHADOW"                                          + "," +  // ML_Decision
+      DoubleToString(MLConfidenceThreshold, 2)          + "\r\n";
    FileWriteString(gMLTradeFile, _row);
 }
 
