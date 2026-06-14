@@ -7,6 +7,123 @@
 
 ---
 
+## Quickstart — Deploy in 5 Steps
+
+**For shadow validation (V1.1 — current phase):**
+
+1. **Compile the EA** — Open `Experts/ICT_ATLAS_EA_V1.0.mq5` in MetaEditor (F4 from MT5) and press Compile (F7). Fix any errors before proceeding.
+
+2. **Attach to chart** — In MT5, open a XAUUSD M15 chart. Drag `ICT_ATLAS_EA_V1.0` from the Navigator onto the chart. Enable "Allow automated trading" and "Allow DLL imports" in the EA properties dialog.
+
+3. **Load the preset** — In the EA Inputs tab, click "Load" and select `Presets/ICT_ATLAS_V1_1_ShadowValidation.set`. Verify the following critical inputs:
+   - `AllowShortEntries = false`
+   - `UseMSSFilter = true`
+   - `BlockLondonHours = true`
+   - `UseMLFilter = false` (shadow mode — gate disabled)
+   - `EnableMLExport = true`, `MLExportSignals = true`, `MLExportTrades = true`
+
+4. **Verify broker settings** — Set `BrokerGMTOffset` to match your broker's server time (see Broker Setup Notes below). Check that the symbol name is exactly `XAUUSD` (not `GOLD`, `XAU/USD`, or `XAUUSDm`).
+
+5. **Monthly shadow scoring** — At month end, export the All Signals CSV and M15 bars from MT5, then run:
+   ```bash
+   python ML/scripts/label_signals.py \
+     --signals ML/data/ICT_ATLAS_All_Signals_XAUUSD.csv \
+     --bars    ML/data/XAUUSD_M15_Bars.csv \
+     --output  ML/data/ICT_ATLAS_Forward_Signals_Labeled.csv
+
+   python ML/scripts/shadow_score.py --mode signals \
+     --signals ML/data/ICT_ATLAS_Forward_Signals_Labeled.csv
+
+   python ML/scripts/shadow_score.py --mode trades
+   ```
+
+---
+
+## Broker Setup Notes
+
+The EA is validated on XAUUSD M15. Three accounts are in use for forward validation:
+
+| Account | Broker | EA | Purpose |
+|---------|--------|----|---------|
+| InstaForex Demo | InstaForex | ICT ATLAS EA V1.0 | Primary shadow validation |
+| Capital.com Demo | Capital.com | ICT ATLAS EA V1.0 | Secondary shadow validation |
+| MT5 Demo | MT5 (broker TBD) | ICT ATLAS SCALPER V1.4 | Scalper shadow validation |
+
+### Symbol Name
+
+Before attaching the EA, confirm the exact symbol name in the MT5 Market Watch:
+
+| Broker | Typical symbol name | Action |
+|--------|--------------------|----|
+| InstaForex | `XAUUSD` | No change needed |
+| Capital.com | `GOLD` or `XAU/USD` | Rename in EA if needed — confirm before running |
+| Generic MT5 | `XAUUSD`, `XAUUSDm`, or `XAUUSD.` | Match exactly to Market Watch name |
+
+The EA uses `Symbol()` internally so attaching to the correct chart is sufficient — but always verify the Market Watch symbol name matches before backtesting.
+
+### BrokerGMTOffset
+
+Set this to the broker's server GMT offset **during standard time (winter)**. Most brokers use GMT+2 (winter) / GMT+3 (summer) with auto-DST:
+
+| Broker | Server timezone | `BrokerGMTOffset` setting |
+|--------|----------------|--------------------------|
+| InstaForex | GMT+3 (fixed, no DST) | `3` |
+| Capital.com | GMT+3 (summer) / GMT+2 (winter) | `2` (let `AutoGMTOffset=false`, set manually) |
+| ICMarkets / Pepperstone | GMT+3 (summer) / GMT+2 (winter) | `2` |
+
+Set `AutoGMTOffset=false` and configure `BrokerGMTOffset` manually. The New York session kill-zone (`NYStartHour=13`, `NYEndHour=16`) is in UTC — an incorrect GMT offset will cause session filtering errors and missed trades during London block hours.
+
+### Spread Considerations
+
+Spread directly affects ML feature quality (the model uses `Spread_Pips` as a top-3 feature):
+
+| Broker | Typical XAUUSD spread | ML impact |
+|--------|-----------------------|-----------|
+| InstaForex | 30–60 pips | Higher — may shift ML scores slightly vs training data |
+| Capital.com | 20–40 pips | Moderate — within training distribution |
+| Raw/ECN brokers | 5–15 pips | Closest to training data (HistData used raw prices) |
+
+The model was trained on raw HistData prices with no spread. Brokers with spreads above 50 pips will hit the `MaxSpreadPips=50` filter more frequently, reducing trade frequency. This is expected behaviour.
+
+### Keeping Accounts Separate
+
+- Each broker account should write CSVs to a distinct MT5 `Files/` folder (MT5 does this automatically per account).
+- When running monthly shadow scoring, use the correct account's exported CSV — do not mix InstaForex and Capital.com trade histories.
+- The InstaForex account is the **primary** shadow track. Capital.com is supplementary.
+
+---
+
+## Monthly M15 Bar Export (ExportBars.mq5)
+
+The all-signals shadow track requires M15 OHLCV bars to label signal outcomes. Export these monthly using the `ExportBars.mq5` script.
+
+### What it does
+
+Exports the last N bars of XAUUSD M15 to a CSV file (`XAUUSD_M15_Bars.csv`) in the MT5 `Files/` folder. Used as input to `label_signals.py` which applies ATR triple-barrier labeling.
+
+### Monthly procedure
+
+1. In MT5, open a **XAUUSD M15** chart (scroll back to ensure full history is loaded).
+2. In the Navigator → Scripts folder, find `ExportBars` (compile from `Experts/ExportBars.mq5` if not listed).
+3. Drag `ExportBars` onto the XAUUSD M15 chart. In the dialog, set the output filename to `XAUUSD_M15_Bars.csv` and bars count to `10000` (or leave as default).
+4. After the script completes, locate the file:
+   - Windows: `C:\Users\<user>\AppData\Roaming\MetaQuotes\Terminal\<id>\MQL5\Files\XAUUSD_M15_Bars.csv`
+5. Copy the file to `ML/data/XAUUSD_M15_Bars.csv` in this repository.
+6. Run `label_signals.py` (see Quickstart Step 5 above).
+
+### Expected CSV format
+
+```
+Timestamp,Open,High,Low,Close,Volume
+2026-06-01 00:00:00,2320.50,2325.10,2318.30,2322.80,1250
+2026-06-01 00:15:00,2322.80,2326.40,2321.00,2324.60,980
+...
+```
+
+If the exported format differs, open `ML/scripts/label_signals.py` and adjust the `read_bars()` function's column names to match.
+
+---
+
 ## What This Project Is
 
 An MQL5 Expert Advisor that trades ICT (Inner Circle Trader) concepts — liquidity sweeps, market structure shifts, fair value gaps, and order blocks — on Gold (XAUUSD) M15. A full research programme (Phases 1–3) identified a profitable, statistically validated configuration. The EA is now in live forward validation while an ML ranking layer is being developed in parallel.
