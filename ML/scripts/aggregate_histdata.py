@@ -28,17 +28,32 @@ DEFAULT_OUTPUT   = Path(__file__).parent.parent / "data" / "XAUUSD_M15_Extended.
 # ── HistData reader ───────────────────────────────────────────────────────────
 
 def read_histdata_csv(text: str) -> pd.DataFrame:
-    """Parse a single HistData M1 CSV string."""
-    df = pd.read_csv(
-        StringIO(text),
-        sep=";",
-        header=None,
-        names=["DateTime", "Open", "High", "Low", "Close", "Volume"],
-        dtype={"DateTime": str},
-    )
-    # DateTime format: "20090102 000100"
-    df["ts"] = pd.to_datetime(df["DateTime"], format="%Y%m%d %H%M%S")
-    df = df.drop(columns=["DateTime"])
+    """Parse a single HistData M1 CSV string.
+
+    Supports two formats:
+      MT format  (comma): 2009.03.15,17:00,929.6,929.6,929.6,929.6,0
+      Old format (semi):  20090102 000100;929.6;929.6;929.6;929.6;0
+    """
+    # Detect delimiter from first line
+    first_line = text.split("\n")[0]
+    if ";" in first_line:
+        df = pd.read_csv(
+            StringIO(text), sep=";", header=None,
+            names=["DateTime", "Open", "High", "Low", "Close", "Volume"],
+            dtype={"DateTime": str},
+        )
+        df["ts"] = pd.to_datetime(df["DateTime"], format="%Y%m%d %H%M%S")
+        df = df.drop(columns=["DateTime"])
+    else:
+        # MT comma format: Date,Time,Open,High,Low,Close,Volume
+        df = pd.read_csv(
+            StringIO(text), sep=",", header=None,
+            names=["Date", "Time", "Open", "High", "Low", "Close", "Volume"],
+            dtype={"Date": str, "Time": str},
+        )
+        df["ts"] = pd.to_datetime(df["Date"] + " " + df["Time"], format="%Y.%m.%d %H:%M")
+        df = df.drop(columns=["Date", "Time"])
+
     df = df[df["Close"] > 0].copy()
     return df.set_index("ts").sort_index()
 
