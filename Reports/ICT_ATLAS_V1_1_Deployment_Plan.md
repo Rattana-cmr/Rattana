@@ -72,61 +72,166 @@ The ML layer receives the signal **only after all existing filters pass**. The m
 
 ## Component 2 — Feature Extraction (New in V1.1)
 
-### Features Required
+### Parity Audit — All 48 Features Confirmed
 
-The LightGBM model uses 15 primary features. All are computable from data already available at signal time — no lookahead, no external calls.
+The ONNX model requires exactly 48 features (verified from `feature_order.txt` and `scaler_params.csv`). The earlier design document incorrectly stated 15 features. **All 48 are confirmed available in the EA at signal time.** Features 44–47, which were previously unverified, are stored in the `SScoreCard` struct (`gScore`) and already logged in the All Signals CSV.
 
-| Feature | Source in EA | Already Logged? |
-|---------|-------------|-----------------|
-| `atr14` | ATR(14) in pips | Yes — `ATR14_Pips` |
-| `spread_pips` | Current spread | Yes — `Spread_Pips` |
-| `atr50` | ATR(50) in pips | Yes — `ATR50_Pips` |
-| `month` | Signal timestamp | Yes — `Timestamp` |
-| `hour` | Signal timestamp | Yes — `Timestamp` |
-| `atr_ratio` | ATR14 / ATR50 | Computed: `ATR14_Pips / ATR50_Pips` |
-| `day_of_week` | Signal timestamp | Yes — `DayOfWeek` |
-| `spread_pct_atr` | Spread / ATR14 | Yes — `SpreadPctATR` |
-| `vol_regime` | ADX × ATR14 | Computed: `ADX_Value × ATR14_Pips` |
-| `adx` | ADX(14) | Yes — `ADX_Value` |
-| `bias_alignment` | Sum of bullish TF biases | Computed from existing bias fields |
-| `sweep_count` | Count of active sweeps | Computed from 7 sweep flags |
-| `spread_quality` | 1 − (spread/ATR14) | Computed from existing fields |
-| `h1_bias` | H1 bias (mapped: Bull=1, Neut=0, Bear=-1) | Yes — `H1Bias` |
-| `prem_disc` | PremDisc_Status (mapped) | Yes — `PremDisc_Status` |
+**Encoding maps (Python → MQL5):**
 
-**All 15 features are already computed by the EA or derivable from logged fields.** No new data sources are required.
+| Python map | Values | MQL5 equivalent |
+|-----------|--------|-----------------|
+| `BIAS_MAP` | BULLISH=1, NEUTRAL=0, BEARISH=-1 | `BIAS_BULLISH=1, BIAS_NEUTRAL=0, BIAS_BEARISH=-1` |
+| `YN_MAP` | YES=1, NO=0 | `1 : 0` boolean cast |
+| `COND_MAP` | TRENDING=2, RANGING=1, CHOPPY=0 | `gScore.condScore` (already encoded) |
+| `PREMDSC_MAP` | PREMIUM=1, OK/EQUILIBRIUM/UNKNOWN=0, DISCOUNT=−1, BLOCKED=−2 | GetPDLabel() → int |
+| `ADR_MAP` | OK=1, BLOCKED=0 | `gADR.blocked ? 0 : 1` |
+| `SESSION_MAP` | NEWYORK=1, else=0 | `GetCurrentSession()==SES_NEWYORK ? 1 : 0` |
+| `DAY_MAP` | Monday=0 … Friday=4 | `dt.day_of_week - 1` (MQL5: Mon=1..Fri=5) |
 
-### MQL5 Feature Vector Construction
+> **Note:** `GetPDLabel()` returns "EQUILIBRIUM" when price is between zones. Python maps this to 0 (NaN→fillna(0)), same as "OK". MQL5 must encode "EQUILIBRIUM" as 0 to match.
+
+### Complete 48-Feature Mapping Table
+
+| Index | Feature | CSV Column | EA Variable / Expression | Type |
+|-------|---------|------------|--------------------------|------|
+| 0 | `hour` | `Timestamp` | `TimeHour(signalTime)` | Derived |
+| 1 | `month` | `Timestamp` | `TimeMonth(signalTime)` | Derived |
+| 2 | `day_of_week` | `DayOfWeek` | `dt.day_of_week - 1` (Mon=0…Fri=4) | Derived |
+| 3 | `session_ny` | `Session` | `GetCurrentSession()==SES_NEWYORK ? 1 : 0` | Derived |
+| 4 | `weekly_bias` | `WeeklyBias` | `BiasToInt(gBias.weekly)` | Logged |
+| 5 | `daily_bias` | `DailyBias` | `BiasToInt(gBias.daily)` | Logged |
+| 6 | `h4_bias` | `H4Bias` | `BiasToInt(gBias.h4)` | Logged |
+| 7 | `h1_bias` | `H1Bias` | `BiasToInt(gBias.h1)` | Logged |
+| 8 | `bias_alignment` | *(derived)* | Count of TFs where bias==BULLISH (0–4) | Derived |
+| 9 | `pdh_sweep` | `PDH_Sweep` | `WasTagSwept("PDH") ? 1 : 0` | Logged |
+| 10 | `pdl_sweep` | `PDL_Sweep` | `WasTagSwept("PDL") ? 1 : 0` | Logged |
+| 11 | `pwh_sweep` | `PWH_Sweep` | `WasTagSwept("PWH") ? 1 : 0` | Logged |
+| 12 | `pwl_sweep` | `PWL_Sweep` | `WasTagSwept("PWL") ? 1 : 0` | Logged |
+| 13 | `asian_sweep` | `Asian_Sweep` | `(WasTagSwept("AsianH")\|\|WasTagSwept("AsianL")) ? 1 : 0` | Logged |
+| 14 | `eqh_sweep` | `EQH_Sweep` | `WasTagSwept("EQH") ? 1 : 0` | Logged |
+| 15 | `eql_sweep` | `EQL_Sweep` | `WasTagSwept("EQL") ? 1 : 0` | Logged |
+| 16 | `sweep_count` | *(derived)* | Sum of features[9..15] | Derived |
+| 17 | `displacement` | `Displacement` | `gDisp.valid && gDisp.bullish==bullish ? 1 : 0` | Logged |
+| 18 | `fvg_present` | `FVG_Present` | `fvgPresent ? 1 : 0` | Logged |
+| 19 | `ob_present` | `OB_Present` | `obPresent ? 1 : 0` | Logged |
+| 20 | `adr_ok` | `ADR_Status` | `gADR.blocked ? 0 : 1` | Logged |
+| 21 | `prem_disc` | `PremDisc_Status` | `GetPDLabel()` → PREMIUM=1, OK/EQUIL=0, DISC=−1, BLOCKED=−2 | Logged |
+| 22 | `market_cond` | `MarketCondition` | TRENDING=2, RANGING=1, CHOPPY=0 | Logged |
+| 23 | `mss_present` | `MSS` | `gMSS.valid && gMSS.bullish==bullish ? 1 : 0` | Logged |
+| 24 | `atr14` | `ATR14_Pips` | `atr14_pips` | Logged |
+| 25 | `atr50` | `ATR50_Pips` | `atr50_pips` | Logged |
+| 26 | `atr_ratio` | *(derived)* | `atr50_pips > 0 ? atr14_pips / atr50_pips : 1.0` | Derived |
+| 27 | `spread_pips` | `Spread_Pips` | `spread_pips` | Logged |
+| 28 | `spread_pct_atr` | `SpreadPctATR` | `spdPct` | Logged |
+| 29 | `adx` | `ADX_Value` | `adx_value` | Logged |
+| 30 | `vol_regime` | *(derived)* | `adx_value * atr14_pips` | Derived |
+| 31 | `spread_quality` | *(derived)* | `MathMax(0, 1.0 - spread_pips / MathMax(atr14_pips, 0.001))` | Derived |
+| 32 | `score_weekly` | `Score_Weekly` | `gScore.weeklyBias` | Logged |
+| 33 | `score_daily` | `Score_Daily` | `gScore.dailyBias` | Logged |
+| 34 | `score_liqsweep` | `Score_LiqSweep` | `gScore.liqSweep` | Logged |
+| 35 | `score_mss` | `Score_MSS` | `gScore.mss` | Logged |
+| 36 | `score_displacement` | `Score_Displacement` | `gScore.displacement` | Logged |
+| 37 | `score_fvg` | `Score_FVG` | `gScore.fvg` | Logged |
+| 38 | `score_killzone` | `Score_Killzone` | `gScore.killzone` | Logged |
+| 39 | `score_smt` | `Score_SMT` | `gScore.smt` | Logged |
+| 40 | `score_adr` | `Score_ADR` | `gScore.adrScore` | Logged |
+| 41 | `score_po3` | `Score_PO3` | `gScore.po3` | Logged |
+| 42 | `score_premdisc` | `Score_PremDisc` | `gScore.premDisc` | Logged |
+| 43 | `confluence_score` | `ConfluenceScore` | `gScore.total` | Logged |
+| 44 | `score_h4align` | `Score_H4Align` | `gScore.h4Align` (+1/0/−1) | **Logged** |
+| 45 | `score_h1align` | `Score_H1Align` | `gScore.h1Align` (+1/0/−1) | **Logged** |
+| 46 | `ob_score` | `OB_Score` | `gScore.obScore` (0 or 1) | **Logged** |
+| 47 | `cond_score` | `Cond_Score` | `gScore.condScore` (0=CHOPPY, 1=RANGING, 2=TRENDING) | **Logged** |
+
+**Summary:** 35 features are logged directly in the All Signals CSV. 8 are derived at signal time from logged values (hour, month, day_of_week, session_ny, bias_alignment, sweep_count, atr_ratio, vol_regime, spread_quality). Zero features require new EA instrumentation.
+
+### MQL5 Feature Vector Construction (Corrected — 48 features)
 
 ```mql5
-// Compute ML feature vector at signal time
-double features[15];
-features[0]  = atr14_pips;
-features[1]  = spread_pips;
-features[2]  = atr50_pips;
-features[3]  = (double)TimeMonth(signal_time);
-features[4]  = (double)TimeHour(signal_time);
-features[5]  = (atr50_pips > 0) ? atr14_pips / atr50_pips : 1.0;  // atr_ratio
-features[6]  = (double)TimeDayOfWeek(signal_time) - 1;              // 0=Mon..4=Fri
-features[7]  = spread_pct_atr;
-features[8]  = adx_value * atr14_pips;                              // vol_regime
-features[9]  = adx_value;
-features[10] = bias_bullish_count;                                   // sum of 4 TF biases
-features[11] = sweep_count;                                          // sum of 7 sweep flags
-features[12] = MathMax(0, 1.0 - (spread_pips / MathMax(atr14_pips, 0.001)));
-features[13] = h1_bias_encoded;                                      // 1/0/-1
-features[14] = prem_disc_encoded;                                    // 1/0/-1/-2
+// All variables assumed live at signal evaluation time
+float feat[48];
+
+MqlDateTime dt;
+TimeToStruct(signalTime, dt);
+
+// Time
+feat[0]  = (float)dt.hour;
+feat[1]  = (float)dt.mon;
+feat[2]  = (float)(dt.day_of_week - 1);  // Mon=0..Fri=4
+
+// Session
+feat[3]  = (float)(GetCurrentSession() == SES_NEWYORK ? 1 : 0);
+
+// Bias (BULL=1, NEUT=0, BEAR=-1)
+feat[4]  = (float)(gBias.weekly == BIAS_BULLISH ? 1 : gBias.weekly == BIAS_BEARISH ? -1 : 0);
+feat[5]  = (float)(gBias.daily  == BIAS_BULLISH ? 1 : gBias.daily  == BIAS_BEARISH ? -1 : 0);
+feat[6]  = (float)(gBias.h4     == BIAS_BULLISH ? 1 : gBias.h4     == BIAS_BEARISH ? -1 : 0);
+feat[7]  = (float)(gBias.h1     == BIAS_BULLISH ? 1 : gBias.h1     == BIAS_BEARISH ? -1 : 0);
+feat[8]  = (float)((gBias.weekly==BIAS_BULLISH?1:0)+(gBias.daily==BIAS_BULLISH?1:0)
+                  +(gBias.h4==BIAS_BULLISH?1:0)+(gBias.h1==BIAS_BULLISH?1:0));  // bias_alignment
+
+// Sweep flags (YES=1, NO=0)
+feat[9]  = (float)(WasTagSwept("PDH")    ? 1 : 0);
+feat[10] = (float)(WasTagSwept("PDL")    ? 1 : 0);
+feat[11] = (float)(WasTagSwept("PWH")    ? 1 : 0);
+feat[12] = (float)(WasTagSwept("PWL")    ? 1 : 0);
+feat[13] = (float)((WasTagSwept("AsianH")||WasTagSwept("AsianL")) ? 1 : 0);
+feat[14] = (float)(WasTagSwept("EQH")    ? 1 : 0);
+feat[15] = (float)(WasTagSwept("EQL")    ? 1 : 0);
+feat[16] = feat[9]+feat[10]+feat[11]+feat[12]+feat[13]+feat[14]+feat[15];  // sweep_count
+
+// Setup flags
+feat[17] = (float)(gDisp.valid && gDisp.bullish == bullish ? 1 : 0);
+feat[18] = (float)(fvgPresent ? 1 : 0);
+feat[19] = (float)(obPresent  ? 1 : 0);
+feat[20] = (float)(gADR.blocked ? 0 : 1);  // adr_ok
+
+// PremDisc: PREMIUM=1, OK/EQUILIBRIUM/UNKNOWN=0, DISCOUNT=-1, BLOCKED=-2
+string pdLabel = GetPDLabel();
+feat[21] = (float)(pdLabel=="PREMIUM" ? 1 : pdLabel=="DISCOUNT" ? -1 : pdLabel=="BLOCKED" ? -2 : 0);
+
+// Market condition: TRENDING=2, RANGING=1, CHOPPY=0
+feat[22] = (float)(gCond.condition==COND_TRENDING ? 2 : gCond.condition==COND_RANGING ? 1 : 0);
+feat[23] = (float)(gMSS.valid && gMSS.bullish == bullish ? 1 : 0);  // mss_present
+
+// ATR / volatility
+feat[24] = (float)atr14_pips;
+feat[25] = (float)atr50_pips;
+feat[26] = (float)(atr50_pips > 0 ? atr14_pips / atr50_pips : 1.0);  // atr_ratio
+feat[27] = (float)spread_pips;
+feat[28] = (float)spdPct;  // spread_pct_atr
+feat[29] = (float)adx_value;
+feat[30] = (float)(adx_value * atr14_pips);  // vol_regime
+feat[31] = (float)MathMax(0.0, 1.0 - spread_pips / MathMax(atr14_pips, 0.001));  // spread_quality
+
+// Confluence component scores (direct from gScore struct)
+feat[32] = (float)gScore.weeklyBias;
+feat[33] = (float)gScore.dailyBias;
+feat[34] = (float)gScore.liqSweep;
+feat[35] = (float)gScore.mss;
+feat[36] = (float)gScore.displacement;
+feat[37] = (float)gScore.fvg;
+feat[38] = (float)gScore.killzone;
+feat[39] = (float)gScore.smt;
+feat[40] = (float)gScore.adrScore;
+feat[41] = (float)gScore.po3;
+feat[42] = (float)gScore.premDisc;
+feat[43] = (float)gScore.total;       // confluence_score
+feat[44] = (float)gScore.h4Align;    // +1/0/-1
+feat[45] = (float)gScore.h1Align;    // +1/0/-1
+feat[46] = (float)gScore.obScore;    // 0 or 1
+feat[47] = (float)gScore.condScore;  // 0=CHOPPY, 1=RANGING, 2=TRENDING
 ```
 
 ### Scaling
 
-The model was trained with `StandardScaler` — mean and std per feature are saved with the model bundle. Each feature must be z-scored before inference:
+The model was trained with `StandardScaler` — mean and std per feature are saved in `ML/outputs/research_v2/deploy/scaler_params.csv`. Each feature must be z-scored before inference:
 
 ```
-scaled[i] = (features[i] - mean[i]) / std[i]
+scaled[i] = (feat[i] - mean[i]) / std[i]
 ```
 
-The scaler parameters (48 means and stds) are exported to a CSV at model build time and embedded in the EA as constants.
+The 48 means and stds are embedded in the EA as compile-time float arrays (exported by `export_onnx.py`).
 
 ---
 
@@ -348,12 +453,13 @@ This shadow phase is separate from Atlas Scalper Phase 8 shadow validation.
 - [ ] Document feature order and encoding (maps to MQL5 array indices)
 
 ### MQL5 Side (EA development)
-- [ ] Add `MLConfidenceThreshold` input (default=0.52, range 0.40–0.70)
-- [ ] Add `UseMLFilter` input (default=false for shadow mode)
-- [ ] Implement feature vector construction (15 features, exact encoding)
-- [ ] Implement scaler (load constants from input or compiled-in array)
-- [ ] Integrate ONNX inference call
-- [ ] Extend CSV export with ML fields
+- [ ] Add `MLConfidenceThreshold` input (default=0.52, range 0.40–0.70) — **already done**
+- [ ] Add `UseMLFilter` input (default=false for shadow mode) — **already done**
+- [ ] Implement feature vector construction (**48 features**, exact encoding per Component 2 table)
+- [ ] Implement scaler (embed 48-element MEAN/STD arrays from `scaler_params.csv`)
+- [ ] Integrate `OnnxCreate()` in `OnInit()` + `OnnxRun()` at signal time
+- [ ] MT5 validation: run 200 cases from `validation_cases.csv` through `OnnxRun()`, confirm max diff < 0.001 vs Python
+- [ ] Extend CSV export with ML fields — **already done** (ML_Score, ML_Decision, ML_Threshold)
 - [ ] Shadow mode: log score always, gate only when `UseMLFilter=true`
 
 ### Validation
