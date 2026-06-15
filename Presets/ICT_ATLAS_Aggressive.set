@@ -1,0 +1,82 @@
+; ICT ATLAS EA V1.0 — Aggressive Preset
+; Target: 15-30 trades/day | Active ICT trading | XAUUSD M15
+; Sweep + relaxed MSS/Disp/FVG/KZ/P&D — all filters relaxed but not eliminated
+
+SymPreset=1                    ; XAUUSD
+
+; Bias
+UseBiasEngine=true
+RequireWeeklyBias=true
+RequireDailyBias=false
+RequireH4Bias=false
+BiasSwingLookback=5
+
+; Liquidity
+UseLiquidityEngine=true
+UseEQHEQL=true
+EQHTolerance=5.0
+LiqLookbackBars=50
+SweepWickMinPips=1             ; smaller wick OK in aggressive
+
+; Structure
+UseMSSFilter=true
+UseBOSFilter=false
+MSSwingLookback=2
+MSSLookbackBars=30
+
+; Displacement
+UseDispFilter=true
+DispMinBodyPct=0.40            ; relaxed
+DispMinATRMulti=0.80           ; relaxed
+DispLookbackBars=8
+
+; FVG
+UseFVGFilter=true
+UseFVGEntry=true
+UseIFVG=true
+FVGMaxAgeBars=80
+MaxFVGsTracked=20
+
+; Premium/Discount
+UsePremDiscFilter=true
+DiscountZone=0.60
+PremiumZone=0.40
+
+; Sessions
+UseSessionFilter=true
+SessionAsian=true
+SessionLondon=true
+SessionNewYork=true
+SessionNYPM=true
+
+; Scoring
+UseScoringSystem=true
+MinScore=55
+
+; Risk
+MaxTradesPerDay=30
+MaxConsecLosses=5
+RiskPercent=0.3
+MaxSLPips=120
+MinSLPips=8
+CooldownMinutes=5
+
+; Aggressive Mode — ON
+AggressiveMode=true
+AggrMinScore=55
+AggrMSSOptional=true
+AggrDispOptional=false
+AggrDispMinBodyPct=0.40
+AggrDispMinATRMulti=0.60
+AggrRequireFVG=false
+AggrStrictPremDisc=false
+AggrADRMaxPct=1.20
+AggrStrictKillzone=false
+ExpandKillzones=true
+AllowContinuation=true
+ScalperMode=false
+
+; Debug
+DebugLogs=true
+ShowPanel=true
+ShowStatPanel=true
