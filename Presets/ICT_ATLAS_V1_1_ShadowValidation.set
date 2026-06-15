@@ -234,5 +234,6 @@ MLExportTrades=true
 ; !! Criteria documented in:                                              !!
 ; !! Reports/ICT_ATLAS_V1_1_Shadow_Validation_Procedure.md               !!
 ; ═══════════════════════════════════════════════════════════════════════
+UseMLShadow=true
 UseMLFilter=false
 MLConfidenceThreshold=0.52

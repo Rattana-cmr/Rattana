@@ -141,6 +141,81 @@ def print_mql5_constants(params):
     print(f"  // Feature order: {{{names}}}")
 
 
+def strip_zipmap(onnx_path):
+    """Remove the ZipMap node from an ONNX model for MT5 compatibility.
+
+    The ZipMap node converts numeric probability outputs into a list of dicts,
+    which MT5's ONNX runtime does not support.  This function strips it and
+    rewires the graph so the model outputs raw int64 labels and float32
+    probability arrays instead.
+
+    Parameters
+    ----------
+    onnx_path : pathlib.Path
+        Path to the ONNX model file to strip.
+    """
+    try:
+        import onnx
+        import onnx.helper as helper
+        from onnx import TensorProto
+        import onnxruntime as rt
+        import numpy as np
+    except ImportError as exc:
+        print(f"  strip_zipmap: skipping — required package not available ({exc})")
+        return
+
+    # Load model
+    model = onnx.load(str(onnx_path))
+    graph = model.graph
+
+    # Locate and remove the ZipMap node
+    zipmap_nodes = [n for n in graph.node if n.op_type == "ZipMap"]
+    if not zipmap_nodes:
+        print("  strip_zipmap: no ZipMap node found — model may already be stripped")
+    for node in zipmap_nodes:
+        graph.node.remove(node)
+
+    # Rebuild outputs: label (int64, [1]) and lgbmprobabilities (float, [None, 2])
+    del graph.output[:]
+    label_output = helper.make_tensor_value_info("label", TensorProto.INT64, [1])
+    prob_output  = helper.make_tensor_value_info("lgbmprobabilities", TensorProto.FLOAT, [None, 2])
+    graph.output.extend([label_output, prob_output])
+
+    # Validate graph structure
+    onnx.checker.check_model(model)
+
+    # Save stripped model
+    out_path = onnx_path.parent / f"{onnx_path.stem}_mt5.onnx"
+    with open(out_path, "wb") as f:
+        f.write(model.SerializeToString())
+
+    # Validate stripped model vs original on 100 synthetic float32 rows
+    rng = np.random.default_rng(42)
+    X_val = rng.standard_normal((100, 48)).astype(np.float32)
+
+    sess_orig     = rt.InferenceSession(str(onnx_path))
+    sess_stripped = rt.InferenceSession(str(out_path))
+
+    input_name = sess_orig.get_inputs()[0].name
+
+    orig_out     = sess_orig.run(None, {input_name: X_val})
+    stripped_out = sess_stripped.run(None, {input_name: X_val})
+
+    # Original model returns dict probabilities; extract class-1 float array
+    orig_proba = orig_out[1]
+    if isinstance(orig_proba[0], dict):
+        orig_proba = np.array([[row[0], row[1]] for row in orig_proba], dtype=np.float32)
+    else:
+        orig_proba = np.array(orig_proba, dtype=np.float32)
+
+    stripped_proba = np.array(stripped_out[1], dtype=np.float32)
+
+    max_diff = float(np.abs(orig_proba - stripped_proba).max())
+    assert max_diff < 1e-6, f"strip_zipmap validation failed: max diff={max_diff:.2e}"
+
+    print(f"  strip_zipmap saved: {out_path}  (max diff vs original={max_diff:.2e})")
+
+
 def run():
     DEPLOY_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -173,6 +248,8 @@ def run():
     if onnx_path:
         print("\n  Validating ONNX output against Python ...")
         validate_onnx(onnx_path, model, scaler, X)
+        print("\n  Stripping ZipMap for MT5 compatibility ...")
+        strip_zipmap(onnx_path)
 
     print_mql5_constants(params)
 

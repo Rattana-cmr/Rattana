@@ -37,6 +37,8 @@
 
 CTrade Trade;
 
+#include "Atlas_ML.mqh"
+
 //===================================================================
 // SECTION 1 — ENUMERATIONS
 //===================================================================
@@ -345,10 +347,11 @@ input bool   MLExportSignals     = true;   // Export all signals (incl. rejected
 input bool   MLExportTrades      = true;   // Export completed trade history
 input int    ScalperMinScore     = 40;     // Min score in scalper mode
 
-//--- ML GATE (V1.1) — shadow logging only, gate disabled until ONNX integrated ----
+//--- ML GATE (V1.1) — ONNX shadow scoring + optional live gate ----
 input group "══════════ [29] ML GATE V1.1 (SHADOW) ══════════"
-input bool   UseMLFilter           = false;  // [V1.1] Activate ML gate (false=shadow log only, gate disabled)
-input double MLConfidenceThreshold = 0.52;   // [V1.1] Min probability to take trade (active only when UseMLFilter=true)
+input bool   UseMLShadow           = true;   // [V1.1] Load ONNX and score every signal (required for shadow validation)
+input bool   UseMLFilter           = false;  // [V1.1] Gate trades by ML score (false=log only; true=requires UseMLShadow=true)
+input double MLConfidenceThreshold = 0.52;   // [V1.1] Min P(win) to take trade (active only when UseMLFilter=true)
 
 //===================================================================
 // SECTION 3 — DATA STRUCTURES
@@ -545,6 +548,8 @@ struct SActiveTrade
    int  snapH1Align;   // H1 alignment vs direction
    int  snapOBScore;   // OB present (0/1)
    int  snapCondScore; // market condition ordinal (0=CHOPPY,1=RANGING,2=TRENDING)
+   double snapMLScore;    // ML probability at trade entry
+   string snapMLDecision; // ML decision at trade entry (TAKEN / ML_REJECTED)
    // Trade outcome flags (populated at close time)
    bool tp3Hit;       // TP3 runner fully hit (TakeProfit exit)
    bool trailActive;  // Trade closed by trailing stop
@@ -694,6 +699,10 @@ int           gMLTradeFile   = INVALID_HANDLE;
 datetime      gLastSignalBar = 0;
 string        gCurSetupID    = "";
 int           gSetupCounter  = 0;
+
+// ML gate (V1.1)
+double        gMLScore    = 0.0;    // Current signal ML probability score
+string        gMLDecision = "NOT_SCORED"; // TAKEN / ML_REJECTED / NOT_SCORED / SHADOW
 
 //===================================================================
 // SECTION 5 — UTILITY FUNCTIONS
@@ -2378,6 +2387,8 @@ bool PlaceTrade(bool bullish)
    gTrade.snapH1Align       = gScore.h1Align;
    gTrade.snapOBScore       = gScore.obScore;
    gTrade.snapCondScore     = gScore.condScore;
+   gTrade.snapMLScore       = gMLScore;
+   gTrade.snapMLDecision    = gMLDecision;
    // Outcome flags reset on open
    gTrade.tp3Hit     = false;
    gTrade.trailActive= false;
@@ -3425,8 +3436,8 @@ void LogSignal(const string setupID, bool executed, bool bullish, const string f
       IntegerToString(gScore.h1Align),
       IntegerToString(gScore.obScore),
       IntegerToString(gScore.condScore),
-      "0.000",           // ML_Score — populated offline by shadow_score.py; real-time in V1.1 live gate
-      "SHADOW",          // ML_Decision — SHADOW=not yet scored; TAKEN/REJECTED when gate is active
+      DoubleToString(gMLScore, 3),   // ML_Score
+      gMLDecision,                    // ML_Decision
       DoubleToString(MLConfidenceThreshold, 2));
 }
 
@@ -3512,8 +3523,8 @@ void LogTradeClose(ulong ticket, datetime closeTime, double profit, double rr, c
       IntegerToString(gTrade.snapH1Align)               + "," +
       IntegerToString(gTrade.snapOBScore)               + "," +
       IntegerToString(gTrade.snapCondScore)             + "," +
-      "0.000"                                           + "," +  // ML_Score — offline shadow; real-time in live gate
-      "SHADOW"                                          + "," +  // ML_Decision
+      DoubleToString(gTrade.snapMLScore, 3)             + "," +
+      gTrade.snapMLDecision                             + "," +
       DoubleToString(MLConfidenceThreshold, 2)          + "\r\n";
    FileWriteString(gMLTradeFile, _row);
 }
@@ -3560,6 +3571,8 @@ void TrackRejection(const string reason)
 void CheckForEntry()
 {
    if(!CanTrade()) return;
+   gMLScore    = 0.0;
+   gMLDecision = "NOT_SCORED";
    if(!gRisk.tradingAllowed) return;
 
    // [P1C] Block all new entries during London killzone hours
@@ -3609,19 +3622,43 @@ void CheckForEntry()
    if(okPrimary)
    {
       if(isNewBar) { lastCountedBar = curBar; gDailyChecked++; }
+
+      // ML scoring — compute score whenever ValidateSetup passes (shadow or live gate)
+      if(UseMLShadow && Atlas_ML_IsLoaded())
+      {
+         double _atr14 = ToPips(GetATRMain(1));
+         double _atr50 = ToPips(GetATR50(1));
+         double _sprd  = GetCurrentSpreadPips();
+         double _spc   = (_atr14 > 0) ? _sprd / _atr14 * 100.0 : 0.0;
+         double _adx   = GetADX(CondADXPeriod, 1);
+         gMLScore    = Atlas_ML_BuildAndPredict(preferBull, iTime(_Symbol, PERIOD_M15, 0), _atr14, _atr50, _sprd, _spc, _adx);
+         gMLDecision = (UseMLFilter && gMLScore < MLConfidenceThreshold) ? "ML_REJECTED" : "TAKEN";
+      }
+      else
+      {
+         gMLScore    = 0.0;
+         gMLDecision = UseMLShadow ? "SHADOW" : "NOT_SCORED";
+      }
+
+      bool mlGatePassed = !UseMLFilter || !Atlas_ML_IsLoaded() || (gMLScore >= MLConfidenceThreshold);
+
       gSetupReady = true;
       gSetupBull  = preferBull;
       gCurGrade   = primaryGrade;
-      bool placed = PlaceTrade(preferBull);
-      if(!placed) { gSetupReady = false; if(isNewBar) gDailyRejected++; }
+      bool placed = false;
+      if(mlGatePassed)
+         placed = PlaceTrade(preferBull);
+      if(!placed) { gSetupReady = false; if(isNewBar && mlGatePassed) gDailyRejected++; }
       if(DebugLogs) Print("SETUP ", placed?"EXECUTED":"REJECTED", ": ",
                           preferBull?"BULL":"BEAR", " Score=", gScore.total,
+                          " ML=", DoubleToString(gMLScore,3), " (", gMLDecision, ")",
                           " Chk=", gDailyChecked, " Rej=", gDailyRejected,
                           " Exec=", gDailyExec);
       if(isNewBar)
       {
-         string rejStep   = placed ? "" : GetRejectedStep(gLastRejectReason);
-         string rejReason = placed ? "" : gLastRejectReason;
+         string rejStep   = placed ? "" : (mlGatePassed ? GetRejectedStep(gLastRejectReason) : "ML_GATE");
+         string rejReason = placed ? "" : (mlGatePassed ? gLastRejectReason :
+                            StringFormat("ML score %.3f < threshold %.2f", gMLScore, MLConfidenceThreshold));
          LogSignal(gCurSetupID, placed, preferBull, rejStep, rejReason);
       }
       return;
@@ -3646,17 +3683,40 @@ void CheckForEntry()
    if(okSecond)
    {
       if(isNewBar) { lastCountedBar = curBar; gDailyChecked++; }
+
+      if(UseMLShadow && Atlas_ML_IsLoaded())
+      {
+         double _atr14 = ToPips(GetATRMain(1));
+         double _atr50 = ToPips(GetATR50(1));
+         double _sprd  = GetCurrentSpreadPips();
+         double _spc   = (_atr14 > 0) ? _sprd / _atr14 * 100.0 : 0.0;
+         double _adx   = GetADX(CondADXPeriod, 1);
+         gMLScore    = Atlas_ML_BuildAndPredict(!preferBull, iTime(_Symbol, PERIOD_M15, 0), _atr14, _atr50, _sprd, _spc, _adx);
+         gMLDecision = (UseMLFilter && gMLScore < MLConfidenceThreshold) ? "ML_REJECTED" : "TAKEN";
+      }
+      else
+      {
+         gMLScore    = 0.0;
+         gMLDecision = UseMLShadow ? "SHADOW" : "NOT_SCORED";
+      }
+
+      bool mlGatePassed = !UseMLFilter || !Atlas_ML_IsLoaded() || (gMLScore >= MLConfidenceThreshold);
+
       gSetupReady = true;
       gSetupBull  = !preferBull;
       gCurGrade   = CalcGrade(gScore.total);
-      bool placed = PlaceTrade(!preferBull);
-      if(!placed) { gSetupReady = false; if(isNewBar) gDailyRejected++; }
+      bool placed = false;
+      if(mlGatePassed)
+         placed = PlaceTrade(!preferBull);
+      if(!placed) { gSetupReady = false; if(isNewBar && mlGatePassed) gDailyRejected++; }
       if(DebugLogs) Print("SETUP ", placed?"EXECUTED":"REJECTED", " (COUNTER): ",
-                          !preferBull?"BULL":"BEAR", " Score=", gScore.total);
+                          !preferBull?"BULL":"BEAR", " Score=", gScore.total,
+                          " ML=", DoubleToString(gMLScore,3), " (", gMLDecision, ")");
       if(isNewBar)
       {
-         string rejStep   = placed ? "" : GetRejectedStep(gLastRejectReason);
-         string rejReason = placed ? "" : gLastRejectReason;
+         string rejStep   = placed ? "" : (mlGatePassed ? GetRejectedStep(gLastRejectReason) : "ML_GATE");
+         string rejReason = placed ? "" : (mlGatePassed ? gLastRejectReason :
+                            StringFormat("ML score %.3f < threshold %.2f", gMLScore, MLConfidenceThreshold));
          LogSignal(gCurSetupID, placed, !preferBull, rejStep, rejReason);
       }
       return;
@@ -3729,12 +3789,21 @@ int OnInit()
 
    InitMLCSVFiles();
 
+   if(UseMLShadow)
+   {
+      if(Atlas_ML_Init())
+         Print("ATLAS ML: Shadow scoring active. UseMLFilter=", UseMLFilter ? "true (LIVE GATE)" : "false (shadow only)");
+      else
+         Print("ATLAS ML: WARN — ONNX init failed. ML_Score will log 0.000.");
+   }
+
    return INIT_SUCCEEDED;
 }
 
 void OnDeinit(const int reason)
 {
    CloseMLCSVFiles();
+   if(UseMLShadow) Atlas_ML_Deinit();
    if(gATR14 != INVALID_HANDLE) IndicatorRelease(gATR14);
    if(gATR50 != INVALID_HANDLE) IndicatorRelease(gATR50);
    if(gADX14 != INVALID_HANDLE) IndicatorRelease(gADX14);
