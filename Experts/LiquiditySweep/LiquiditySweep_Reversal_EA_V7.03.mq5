@@ -1,10 +1,10 @@
 //+------------------------------------------------------------------+
 //|                                LiquiditySweep_Reversal_EA.mq5    |
 //|                     HIGH FREQUENCY - 15-30 trades/day           |
-//|                     Version 7.4                                 |
+//|                     Version 7.3                                 |
 //+------------------------------------------------------------------+
 #property copyright "Liquidity Sweep EA"
-#property version   "7.40"
+#property version   "7.30"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -241,7 +241,6 @@ int            dailySweepFound = 0;
 int            dailyBosConf    = 0;
 int            dailyRejections = 0;
 string         activeSessionName = "None";  // updated by CheckSession() — shown on dashboard
-bool           dashboardCollapsed = false;  // toggled by the [-]/[+] button on the dashboard
 
 //+------------------------------------------------------------------+
 //| Logging helper                                                   |
@@ -303,7 +302,7 @@ int OnInit()
       CreateDashboard();
 
    Print("========================================");
-   Print("LIQUIDITY SWEEP EA v7.4 - HIGH FREQUENCY");
+   Print("LIQUIDITY SWEEP EA v7.3 - HIGH FREQUENCY");
    Print("Monitoring: ", IntegerToString(symbolCnt), " symbols");
    Print("Aggressive Mode: ", EnumToString(InpAggressiveMode));
    Print("Correlation Filter: ", InpUseCorrelationFilter ? "ON (max " + IntegerToString(InpMaxCorrelatedPositions) + ")" : "OFF");
@@ -350,20 +349,6 @@ void OnDeinit(const int reason)
    Print(StringFormat("  TOTAL PASS=%d  TOTAL FAIL=%d", totalPass, totalFail));
    Print("===================================================");
    Print("EA deinitialized");
-}
-
-//+------------------------------------------------------------------+
-//| Chart events – dashboard collapse/expand toggle                  |
-//+------------------------------------------------------------------+
-void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
-{
-   if(id == CHARTEVENT_OBJECT_CLICK && sparam == "DB_Toggle")
-   {
-      dashboardCollapsed = (bool)ObjectGetInteger(0, "DB_Toggle", OBJPROP_STATE);
-      ObjectSetString(0, "DB_Toggle", OBJPROP_TEXT, dashboardCollapsed ? "+" : "-");
-      if(InpShowDashboard) UpdateDashboard();
-      ChartRedraw(0);
-   }
 }
 
 //+------------------------------------------------------------------+
@@ -1271,24 +1256,20 @@ void ManagePositions(int idx)
 //| Dashboard helpers                                                |
 //+------------------------------------------------------------------+
 
-#define DB_WIDTH            264
-#define DB_HEIGHT            360  // expanded panel height
-#define DB_HEIGHT_COLLAPSED  30   // title-bar-only height when collapsed
-
 // Translate InpDashboardCorner + offsets into absolute top-left pixel
 // coords for the panel, then always use CORNER_LEFT_UPPER for every
 // object so text never renders off-screen and y always goes downward.
 int GetPanelX()
 {
    if(InpDashboardCorner == 1 || InpDashboardCorner == 2)
-      return (int)(ChartGetInteger(0, CHART_WIDTH_IN_PIXELS) - InpDashboardXOffset - DB_WIDTH);
+      return (int)(ChartGetInteger(0, CHART_WIDTH_IN_PIXELS) - InpDashboardXOffset - 264);
    return InpDashboardXOffset;
 }
 
 int GetPanelY()
 {
    if(InpDashboardCorner == 2 || InpDashboardCorner == 3)
-      return (int)(ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS) - InpDashboardYOffset - DB_HEIGHT);
+      return (int)(ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS) - InpDashboardYOffset - 335);
    return InpDashboardYOffset;
 }
 
@@ -1332,14 +1313,16 @@ void CreateDashboard()
    DeleteDashboard();
    int x = GetPanelX();
    int y = GetPanelY();
+   int width  = 264;
+   int height = 335;
 
    if(ObjectCreate(0, "DB_Rect", OBJ_RECTANGLE_LABEL, 0, 0, 0))
    {
       ObjectSetInteger(0, "DB_Rect", OBJPROP_CORNER,       CORNER_LEFT_UPPER);
       ObjectSetInteger(0, "DB_Rect", OBJPROP_XDISTANCE,    x);
       ObjectSetInteger(0, "DB_Rect", OBJPROP_YDISTANCE,    y);
-      ObjectSetInteger(0, "DB_Rect", OBJPROP_XSIZE,        DB_WIDTH);
-      ObjectSetInteger(0, "DB_Rect", OBJPROP_YSIZE,        dashboardCollapsed ? DB_HEIGHT_COLLAPSED : DB_HEIGHT);
+      ObjectSetInteger(0, "DB_Rect", OBJPROP_XSIZE,        width);
+      ObjectSetInteger(0, "DB_Rect", OBJPROP_YSIZE,        height);
       ObjectSetInteger(0, "DB_Rect", OBJPROP_BGCOLOR,      clrBlack);
       ObjectSetInteger(0, "DB_Rect", OBJPROP_BORDER_COLOR, clrDarkGoldenrod);
       ObjectSetInteger(0, "DB_Rect", OBJPROP_BACK,         false);  // foreground: covers candles
@@ -1362,23 +1345,7 @@ void CreateDashboard()
       ObjectSetInteger(0, "DB_Version", OBJPROP_COLOR,     clrWhite);
       ObjectSetInteger(0, "DB_Version", OBJPROP_FONTSIZE,  7);
       ObjectSetString(0,  "DB_Version", OBJPROP_FONT,      "Arial");
-      ObjectSetString(0,  "DB_Version", OBJPROP_TEXT,      "V7.4 BOS: " + BOSModeText(InpBOSMode));
-   }
-   if(ObjectCreate(0, "DB_Toggle", OBJ_BUTTON, 0, 0, 0))
-   {
-      ObjectSetInteger(0, "DB_Toggle", OBJPROP_CORNER,       CORNER_LEFT_UPPER);
-      ObjectSetInteger(0, "DB_Toggle", OBJPROP_XDISTANCE,    x + DB_WIDTH - 26);
-      ObjectSetInteger(0, "DB_Toggle", OBJPROP_YDISTANCE,    y + 4);
-      ObjectSetInteger(0, "DB_Toggle", OBJPROP_XSIZE,        18);
-      ObjectSetInteger(0, "DB_Toggle", OBJPROP_YSIZE,        16);
-      ObjectSetString(0,  "DB_Toggle", OBJPROP_TEXT,         dashboardCollapsed ? "+" : "-");
-      ObjectSetInteger(0, "DB_Toggle", OBJPROP_COLOR,        clrGold);
-      ObjectSetInteger(0, "DB_Toggle", OBJPROP_BGCOLOR,      clrBlack);
-      ObjectSetInteger(0, "DB_Toggle", OBJPROP_BORDER_COLOR, clrDarkGoldenrod);
-      ObjectSetInteger(0, "DB_Toggle", OBJPROP_FONTSIZE,     8);
-      ObjectSetInteger(0, "DB_Toggle", OBJPROP_STATE,        dashboardCollapsed);
-      ObjectSetInteger(0, "DB_Toggle", OBJPROP_SELECTABLE,   false);
-      ObjectSetInteger(0, "DB_Toggle", OBJPROP_BACK,         false);
+      ObjectSetString(0,  "DB_Version", OBJPROP_TEXT,      "V7.3 BOS: " + BOSModeText(InpBOSMode));
    }
 }
 
@@ -1391,26 +1358,11 @@ void UpdateDashboard()
    // Keep rect anchored correctly after chart resize
    ObjectSetInteger(0, "DB_Rect", OBJPROP_XDISTANCE, x);
    ObjectSetInteger(0, "DB_Rect", OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, "DB_Rect", OBJPROP_YSIZE,     335);
    ObjectSetInteger(0, "DB_Title",   OBJPROP_XDISTANCE, x + 8);
    ObjectSetInteger(0, "DB_Title",   OBJPROP_YDISTANCE, y + 4);
    ObjectSetInteger(0, "DB_Version", OBJPROP_XDISTANCE, x + 8);
    ObjectSetInteger(0, "DB_Version", OBJPROP_YDISTANCE, y + 18);
-   ObjectSetInteger(0, "DB_Toggle",  OBJPROP_XDISTANCE, x + DB_WIDTH - 26);
-   ObjectSetInteger(0, "DB_Toggle",  OBJPROP_YDISTANCE, y + 4);
-
-   if(dashboardCollapsed)
-   {
-      ObjectSetInteger(0, "DB_Rect", OBJPROP_YSIZE, DB_HEIGHT_COLLAPSED);
-      string bodyLabels[] = {"DB_Mode","DB_Status","DB_Trades","DB_Open","DB_DailyR","DB_WinRate",
-         "DB_LossStreak","DB_Sep","DB_StatsTitle","DB_LpFound","DB_SwFound","DB_BosConf",
-         "DB_Entries","DB_Rejects","DB_Sep2","DB_SignalsTitle","DB_NoSignals"};
-      for(int i = 0; i < ArraySize(bodyLabels); i++)
-         ObjectDelete(0, bodyLabels[i]);
-      for(int s = 1; s <= 5; s++)
-         ObjectDelete(0, "DB_Sig" + IntegerToString(s));
-      return;
-   }
-   ObjectSetInteger(0, "DB_Rect", OBJPROP_YSIZE, DB_HEIGHT);
 
    int line = 30;
    string modeText = "";
@@ -1438,7 +1390,7 @@ void UpdateDashboard()
    line += 15;
    CreateOrUpdateLabel("DB_Open", x + 8, y + line, 0, clrWhite,
       "Open: " + IntegerToString(activePositions) + "/" + IntegerToString(InpMaxOpenPositions));
-   line += 15 + 8;  // extra gap before the performance section
+   line += 15;
    double dailyProfit = globalDailyR * (AccountInfoDouble(ACCOUNT_BALANCE) * InpRiskPercent / 100.0);
    color profitColor = (globalDailyR >= 0) ? clrLimeGreen : clrRed;
    CreateOrUpdateLabel("DB_DailyR", x + 8, y + line, 0, profitColor,
@@ -1463,7 +1415,7 @@ void UpdateDashboard()
    line += 15;
    CreateOrUpdateLabel("DB_Sep", x + 8, y + line, 0, clrDimGray,
       "- - - - - - - - - - - - - - - -");
-   line += 18;  // wider gap separating the pipeline section
+   line += 12;
    CreateOrUpdateLabel("DB_StatsTitle", x + 8, y + line, 0, clrGold, "-- TODAY'S PIPELINE --");
    line += 13;
    CreateOrUpdateLabel("DB_LpFound",  x + 8, y + line, 0, clrSilver,
@@ -1483,7 +1435,7 @@ void UpdateDashboard()
    line += 13;
    CreateOrUpdateLabel("DB_Sep2", x + 8, y + line, 0, clrDimGray,
       "- - - - - - - - - - - - - - - -");
-   line += 18;  // wider gap separating the active-signals section
+   line += 12;
    CreateOrUpdateLabel("DB_SignalsTitle", x + 8, y + line, 0, clrGold, "-- ACTIVE SIGNALS --");
    line += 14;
    int signalCount = 0;
