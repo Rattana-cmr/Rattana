@@ -1,10 +1,10 @@
 //+------------------------------------------------------------------+
 //|                                LiquiditySweep_Reversal_EA.mq5    |
 //|                     HIGH FREQUENCY - 15-30 trades/day           |
-//|                     Version 6.9                                 |
+//|                     Version 6.10                                |
 //+------------------------------------------------------------------+
 #property copyright "Liquidity Sweep EA"
-#property version   "6.90"
+#property version   "6.10"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -103,12 +103,23 @@ input bool     InpAutoDisablePoorSymbols = true;
 input double   InpMinWinRate       = 35.0;
 input int      InpMinTradesForDecision = 50;
 
-input group "=== Session Filter ==="
-input bool     InpUseSessionFilter = true;
-input int      InpSessionStartHour = 7;   // GMT hour
-input int      InpSessionStartMin  = 0;
-input int      InpSessionEndHour   = 23;  // GMT hour
-input int      InpSessionEndMin    = 0;
+input group "=== Session Filter (Multi-Session, GMT) ==="
+input bool     InpUseSessionFilter   = true;   // master switch — false = trade 24h
+input bool     InpSessionAsianOn     = true;   // Sydney/Tokyo
+input int      InpAsianStartHour     = 23;
+input int      InpAsianStartMin      = 0;
+input int      InpAsianEndHour       = 8;
+input int      InpAsianEndMin        = 0;
+input bool     InpSessionLondonOn    = true;
+input int      InpLondonStartHour    = 7;
+input int      InpLondonStartMin     = 0;
+input int      InpLondonEndHour      = 16;
+input int      InpLondonEndMin       = 0;
+input bool     InpSessionNewYorkOn   = true;
+input int      InpNewYorkStartHour   = 12;
+input int      InpNewYorkStartMin    = 0;
+input int      InpNewYorkEndHour     = 21;
+input int      InpNewYorkEndMin      = 0;
 
 input group "=== Spread Limits (pips) ==="
 input double   InpSpreadLimitEURUSD = 1.5;
@@ -228,6 +239,7 @@ int            dailyLpFound    = 0;  // resets each day — shown on dashboard
 int            dailySweepFound = 0;
 int            dailyBosConf    = 0;
 int            dailyRejections = 0;
+string         activeSessionName = "None";  // updated by CheckSession() — shown on dashboard
 
 //+------------------------------------------------------------------+
 //| Logging helper                                                   |
@@ -289,13 +301,20 @@ int OnInit()
       CreateDashboard();
 
    Print("========================================");
-   Print("LIQUIDITY SWEEP EA v6.9 - HIGH FREQUENCY");
+   Print("LIQUIDITY SWEEP EA v6.10 - HIGH FREQUENCY");
    Print("Monitoring: ", IntegerToString(symbolCnt), " symbols");
    Print("Aggressive Mode: ", EnumToString(InpAggressiveMode));
    Print("Correlation Filter: ", InpUseCorrelationFilter ? "ON (max " + IntegerToString(InpMaxCorrelatedPositions) + ")" : "OFF");
    Print("Max Open Positions: ", IntegerToString(InpMaxOpenPositions));
    Print("BOS Mode: ", EnumToString(InpBOSMode));
-   Print("Session Filter (GMT): ", InpUseSessionFilter ? IntegerToString(InpSessionStartHour) + ":" + IntegerToString(InpSessionStartMin) + " - " + IntegerToString(InpSessionEndHour) + ":" + IntegerToString(InpSessionEndMin) : "OFF");
+   if(InpUseSessionFilter)
+   {
+      Print("Session Filter (GMT): Asian=",   InpSessionAsianOn   ? (IntegerToString(InpAsianStartHour)   + ":" + IntegerToString(InpAsianStartMin)   + "-" + IntegerToString(InpAsianEndHour)   + ":" + IntegerToString(InpAsianEndMin))   : "OFF",
+            " | London=", InpSessionLondonOn  ? (IntegerToString(InpLondonStartHour)  + ":" + IntegerToString(InpLondonStartMin)  + "-" + IntegerToString(InpLondonEndHour)  + ":" + IntegerToString(InpLondonEndMin))  : "OFF",
+            " | NewYork=", InpSessionNewYorkOn ? (IntegerToString(InpNewYorkStartHour) + ":" + IntegerToString(InpNewYorkStartMin) + "-" + IntegerToString(InpNewYorkEndHour) + ":" + IntegerToString(InpNewYorkEndMin)) : "OFF");
+   }
+   else
+      Print("Session Filter: OFF (trading 24h)");
    Print("Debug Mode: ON - detailed logging enabled");
    Print("========================================");
 
@@ -512,32 +531,50 @@ bool IsNewBar(int idx, ENUM_TIMEFRAMES tf)
 }
 
 //+------------------------------------------------------------------+
-//| Session check (compares against GMT hours)                       |
+//| Session check — true if ANY enabled session window is active.   |
+//| Handles windows that cross midnight (e.g. Asian 23:00-08:00).   |
 //+------------------------------------------------------------------+
+bool InSessionWindow(int currentMinutes, int startH, int startM, int endH, int endM)
+{
+   int startMinutes = startH * 60 + startM;
+   int endMinutes   = endH * 60 + endM;
+   if(startMinutes == endMinutes) return true;  // 24h window
+   if(startMinutes < endMinutes)
+      return (currentMinutes >= startMinutes && currentMinutes < endMinutes);
+   return (currentMinutes >= startMinutes || currentMinutes < endMinutes);  // wraps midnight
+}
+
 bool CheckSession()
 {
-   if(!InpUseSessionFilter) return true;
+   if(!InpUseSessionFilter) { activeSessionName = "ALL (filter off)"; return true; }
    MqlDateTime dtGMT;
    TimeToStruct(TimeGMT(), dtGMT);
    int currentMinutes = dtGMT.hour * 60 + dtGMT.min;
-   int startMinutes = InpSessionStartHour * 60 + InpSessionStartMin;
-   int endMinutes = InpSessionEndHour * 60 + InpSessionEndMin;
-   bool active = (currentMinutes >= startMinutes && currentMinutes < endMinutes);
+
+   bool active = false;
+   string names = "";
+   if(InpSessionAsianOn && InSessionWindow(currentMinutes, InpAsianStartHour, InpAsianStartMin, InpAsianEndHour, InpAsianEndMin))
+      { active = true; names += "Asian "; }
+   if(InpSessionLondonOn && InSessionWindow(currentMinutes, InpLondonStartHour, InpLondonStartMin, InpLondonEndHour, InpLondonEndMin))
+      { active = true; names += "London "; }
+   if(InpSessionNewYorkOn && InSessionWindow(currentMinutes, InpNewYorkStartHour, InpNewYorkStartMin, InpNewYorkEndHour, InpNewYorkEndMin))
+      { active = true; names += "NewYork "; }
+   activeSessionName = active ? names : "None";
 
    // Log only when status changes — not every tick — to keep journal clean
    if(InpDebugMode)
    {
       static bool lastSessionActive = false;
-      if(active != lastSessionActive)
+      static string lastSessionName = "";
+      if(active != lastSessionActive || activeSessionName != lastSessionName)
       {
          MqlDateTime dtLocal;
          TimeToStruct(TimeCurrent(), dtLocal);
-         Print("Session ", active ? "OPEN" : "CLOSED",
+         Print("Session ", active ? "OPEN (" + activeSessionName + ")" : "CLOSED",
                " | Broker ", dtLocal.hour, ":", dtLocal.min,
-               " | GMT ", dtGMT.hour, ":", dtGMT.min,
-               " | Window ", InpSessionStartHour, ":", InpSessionStartMin,
-               " - ", InpSessionEndHour, ":", InpSessionEndMin);
+               " | GMT ", dtGMT.hour, ":", dtGMT.min);
          lastSessionActive = active;
+         lastSessionName = activeSessionName;
       }
    }
    return active;
@@ -1279,7 +1316,7 @@ void CreateDashboard()
       ObjectSetInteger(0, "DB_Version", OBJPROP_COLOR,     clrGray);
       ObjectSetInteger(0, "DB_Version", OBJPROP_FONTSIZE,  8);
       ObjectSetString(0,  "DB_Version", OBJPROP_FONT,      "Arial");
-      ObjectSetString(0,  "DB_Version", OBJPROP_TEXT,      "v6.9 | BOS: " + EnumToString(InpBOSMode));
+      ObjectSetString(0,  "DB_Version", OBJPROP_TEXT,      "v6.10 | BOS: " + EnumToString(InpBOSMode));
    }
 }
 
@@ -1316,6 +1353,7 @@ void UpdateDashboard()
    else if(globalDailyR <= InpMaxDailyLossR)       { statusText = "PAUSED: Daily loss limit";   statusColor = clrRed;    }
    else if(!CheckSession())                        { statusText = "PAUSED: Outside session";    statusColor = clrGray;   }
    else if(activePositions >= InpMaxOpenPositions) { statusText = "PAUSED: Max open positions"; statusColor = clrOrange; }
+   else                                             { statusText = "RUNNING (" + activeSessionName + ")"; }
    CreateOrUpdateLabel("DB_Status", x + 8, y + line, 0, statusColor, "Status: " + statusText);
    line += 15;
    CreateOrUpdateLabel("DB_Trades", x + 8, y + line, 0, clrWhite,
