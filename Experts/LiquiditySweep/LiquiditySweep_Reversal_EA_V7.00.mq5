@@ -1,10 +1,10 @@
 //+------------------------------------------------------------------+
 //|                                LiquiditySweep_Reversal_EA.mq5    |
 //|                     HIGH FREQUENCY - 15-30 trades/day           |
-//|                     Version 7.1                                 |
+//|                     Version 7.0                                 |
 //+------------------------------------------------------------------+
 #property copyright "Liquidity Sweep EA"
-#property version   "7.10"
+#property version   "7.00"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -301,7 +301,7 @@ int OnInit()
       CreateDashboard();
 
    Print("========================================");
-   Print("LIQUIDITY SWEEP EA v7.1 - HIGH FREQUENCY");
+   Print("LIQUIDITY SWEEP EA v7.0 - HIGH FREQUENCY");
    Print("Monitoring: ", IntegerToString(symbolCnt), " symbols");
    Print("Aggressive Mode: ", EnumToString(InpAggressiveMode));
    Print("Correlation Filter: ", InpUseCorrelationFilter ? "ON (max " + IntegerToString(InpMaxCorrelatedPositions) + ")" : "OFF");
@@ -813,14 +813,6 @@ void OnTick()
 {
    UpdateDailyReset();
    activePositions = CountOpenPositions();
-
-   // Manage already-open positions every tick regardless of whether new
-   // entries are currently gated — trailing stop/break-even/partial close
-   // must never freeze just because a daily/session limit is active.
-   for(int i = 0; i < ArraySize(symbols); i++)
-      if(symbols[i].positionTicket != 0)
-         ManagePositions(i);
-
    if(InpShowDashboard) UpdateDashboard();
    if(InpMaxDailyTrades > 0 && globalDailyTrades >= InpMaxDailyTrades) return;
    if(globalDailyR >= InpMaxDailyNetR) return;
@@ -858,7 +850,7 @@ void ProcessSymbol(int idx)
    bool atrOK = CheckATR(idx);
    LogDecision(sym, "ATR", atrOK, DoubleToString(symbols[idx].atr / symbols[idx].pipSize,1) + " pips");
    if(!atrOK) return;
-   // Position management now runs unconditionally at the top of OnTick()
+   ManagePositions(idx);
    ENUM_TIMEFRAMES sweepTF = GetSweepTF();
    if(!IsNewBar(idx, sweepTF)) return;
    FindSetup(idx, sweepTF);
@@ -1315,7 +1307,7 @@ void CreateDashboard()
       ObjectSetInteger(0, "DB_Title", OBJPROP_COLOR,     clrGold);
       ObjectSetInteger(0, "DB_Title", OBJPROP_FONTSIZE,  10);
       ObjectSetString(0,  "DB_Title", OBJPROP_FONT,      "Arial Bold");
-      ObjectSetString(0,  "DB_Title", OBJPROP_TEXT,      "Liquidity Sweep Reversal Pro");
+      ObjectSetString(0,  "DB_Title", OBJPROP_TEXT,      "LIQUIDITY SWEEP EA PRO");
    }
    if(ObjectCreate(0, "DB_Version", OBJ_LABEL, 0, 0, 0))
    {
@@ -1325,7 +1317,7 @@ void CreateDashboard()
       ObjectSetInteger(0, "DB_Version", OBJPROP_COLOR,     clrGray);
       ObjectSetInteger(0, "DB_Version", OBJPROP_FONTSIZE,  8);
       ObjectSetString(0,  "DB_Version", OBJPROP_FONT,      "Arial");
-      ObjectSetString(0,  "DB_Version", OBJPROP_TEXT,      "V7.1 | BOS: " + EnumToString(InpBOSMode));
+      ObjectSetString(0,  "DB_Version", OBJPROP_TEXT,      "v7.0 | BOS: " + EnumToString(InpBOSMode));
    }
 }
 
@@ -1433,14 +1425,8 @@ void UpdateDashboard()
          line += 13;
       }
    }
-   // Remove leftover slot labels from a previous tick that had more signals,
-   // and the "no signals" label, so stale text never overlaps fresh text
-   for(int s = signalCount + 1; s <= 5; s++)
-      ObjectDelete(0, "DB_Sig" + IntegerToString(s));
    if(signalCount == 0)
       CreateOrUpdateLabel("DB_NoSignals", x + 12, y + line, 0, clrDimGray, "No active signals");
-   else
-      ObjectDelete(0, "DB_NoSignals");
 }
 
 //+------------------------------------------------------------------+
