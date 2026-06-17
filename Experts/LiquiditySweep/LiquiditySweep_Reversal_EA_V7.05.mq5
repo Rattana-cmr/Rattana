@@ -1273,7 +1273,7 @@ void ManagePositions(int idx)
 
 #define DB_WIDTH            264
 #define DB_HEIGHT            360  // expanded panel height
-#define DB_HEIGHT_COLLAPSED  30   // title-bar-only height when collapsed
+#define DB_HEIGHT_COLLAPSED  36   // title-bar-only height when collapsed
 
 // Translate InpDashboardCorner + offsets into absolute top-left pixel
 // coords for the panel, then always use CORNER_LEFT_UPPER for every
@@ -1358,7 +1358,7 @@ void CreateDashboard()
    {
       ObjectSetInteger(0, "DB_Version", OBJPROP_CORNER,    CORNER_LEFT_UPPER);
       ObjectSetInteger(0, "DB_Version", OBJPROP_XDISTANCE, x + 8);
-      ObjectSetInteger(0, "DB_Version", OBJPROP_YDISTANCE, y + 18);
+      ObjectSetInteger(0, "DB_Version", OBJPROP_YDISTANCE, y + 22);
       ObjectSetInteger(0, "DB_Version", OBJPROP_COLOR,     clrWhite);
       ObjectSetInteger(0, "DB_Version", OBJPROP_FONTSIZE,  7);
       ObjectSetString(0,  "DB_Version", OBJPROP_FONT,      "Arial");
@@ -1394,7 +1394,7 @@ void UpdateDashboard()
    ObjectSetInteger(0, "DB_Title",   OBJPROP_XDISTANCE, x + 8);
    ObjectSetInteger(0, "DB_Title",   OBJPROP_YDISTANCE, y + 4);
    ObjectSetInteger(0, "DB_Version", OBJPROP_XDISTANCE, x + 8);
-   ObjectSetInteger(0, "DB_Version", OBJPROP_YDISTANCE, y + 18);
+   ObjectSetInteger(0, "DB_Version", OBJPROP_YDISTANCE, y + 22);
    ObjectSetInteger(0, "DB_Toggle",  OBJPROP_XDISTANCE, x + DB_WIDTH - 26);
    ObjectSetInteger(0, "DB_Toggle",  OBJPROP_YDISTANCE, y + 4);
 
@@ -1411,7 +1411,7 @@ void UpdateDashboard()
       return;
    }
 
-   int line = 30;
+   int line = 34;
    string modeText = "";
    switch(InpAggressiveMode)
    {
