@@ -1,10 +1,10 @@
 //+------------------------------------------------------------------+
 //|                                LiquiditySweep_Reversal_EA.mq5    |
 //|                     HIGH FREQUENCY - 15-30 trades/day           |
-//|                     Version 6.10                                |
+//|                     Version 7.0                                 |
 //+------------------------------------------------------------------+
 #property copyright "Liquidity Sweep EA"
-#property version   "6.10"
+#property version   "7.00"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -73,7 +73,7 @@ input double   InpPartialTP_R    = 1.0;
 input double   InpMaxSlPips      = 15.0;  // Hard SL cap in pips (0 = no cap)
 
 input group "=== Trade Management ==="
-input int      InpMaxDailyTrades  = 30;
+input int      InpMaxDailyTrades  = 0;  // 0 = unlimited (trade continuously until market/session close)
 input int      InpMaxTradesPerSymbol = 0;  // per-symbol daily cap (0 = auto from global/symbols)
 input double   InpMaxDailyNetR    = 8.0;
 input double   InpMaxDailyLossR   = -3.0;
@@ -301,7 +301,7 @@ int OnInit()
       CreateDashboard();
 
    Print("========================================");
-   Print("LIQUIDITY SWEEP EA v6.10 - HIGH FREQUENCY");
+   Print("LIQUIDITY SWEEP EA v7.0 - HIGH FREQUENCY");
    Print("Monitoring: ", IntegerToString(symbolCnt), " symbols");
    Print("Aggressive Mode: ", EnumToString(InpAggressiveMode));
    Print("Correlation Filter: ", InpUseCorrelationFilter ? "ON (max " + IntegerToString(InpMaxCorrelatedPositions) + ")" : "OFF");
@@ -739,6 +739,7 @@ void UpdateTradeStats()
 int GetSymbolDailyLimit()
 {
    if(InpMaxTradesPerSymbol > 0) return InpMaxTradesPerSymbol;
+   if(InpMaxDailyTrades <= 0) return INT_MAX;  // global cap unlimited -> per-symbol cap unlimited too
    int activeSymbols = 0;
    for(int i = 0; i < ArraySize(symbols); i++)
       if(!symbols[i].perf.isDisabled) activeSymbols++;
@@ -813,7 +814,7 @@ void OnTick()
    UpdateDailyReset();
    activePositions = CountOpenPositions();
    if(InpShowDashboard) UpdateDashboard();
-   if(globalDailyTrades >= InpMaxDailyTrades) return;
+   if(InpMaxDailyTrades > 0 && globalDailyTrades >= InpMaxDailyTrades) return;
    if(globalDailyR >= InpMaxDailyNetR) return;
    if(globalDailyR <= InpMaxDailyLossR) return;
    // Session is global — check once here, not per-symbol
@@ -1316,7 +1317,7 @@ void CreateDashboard()
       ObjectSetInteger(0, "DB_Version", OBJPROP_COLOR,     clrGray);
       ObjectSetInteger(0, "DB_Version", OBJPROP_FONTSIZE,  8);
       ObjectSetString(0,  "DB_Version", OBJPROP_FONT,      "Arial");
-      ObjectSetString(0,  "DB_Version", OBJPROP_TEXT,      "v6.10 | BOS: " + EnumToString(InpBOSMode));
+      ObjectSetString(0,  "DB_Version", OBJPROP_TEXT,      "v7.0 | BOS: " + EnumToString(InpBOSMode));
    }
 }
 
@@ -1348,7 +1349,7 @@ void UpdateDashboard()
    line += 15;
    string statusText = "RUNNING";
    color statusColor = clrLimeGreen;
-   if(globalDailyTrades >= InpMaxDailyTrades)      { statusText = "PAUSED: Daily trade limit";  statusColor = clrOrange; }
+   if(InpMaxDailyTrades > 0 && globalDailyTrades >= InpMaxDailyTrades) { statusText = "PAUSED: Daily trade limit";  statusColor = clrOrange; }
    else if(globalDailyR >= InpMaxDailyNetR)        { statusText = "PAUSED: Daily target hit";   statusColor = clrOrange; }
    else if(globalDailyR <= InpMaxDailyLossR)       { statusText = "PAUSED: Daily loss limit";   statusColor = clrRed;    }
    else if(!CheckSession())                        { statusText = "PAUSED: Outside session";    statusColor = clrGray;   }
@@ -1357,7 +1358,7 @@ void UpdateDashboard()
    CreateOrUpdateLabel("DB_Status", x + 8, y + line, 0, statusColor, "Status: " + statusText);
    line += 15;
    CreateOrUpdateLabel("DB_Trades", x + 8, y + line, 0, clrWhite,
-      "Trades: " + IntegerToString(globalDailyTrades) + "/" + IntegerToString(InpMaxDailyTrades));
+      "Trades: " + IntegerToString(globalDailyTrades) + "/" + (InpMaxDailyTrades > 0 ? IntegerToString(InpMaxDailyTrades) : "unlimited"));
    line += 15;
    CreateOrUpdateLabel("DB_Open", x + 8, y + line, 0, clrWhite,
       "Open: " + IntegerToString(activePositions) + "/" + IntegerToString(InpMaxOpenPositions));
