@@ -1,10 +1,10 @@
 //+------------------------------------------------------------------+
 //|                                LiquiditySweep_Reversal_EA.mq5    |
 //|                     HIGH FREQUENCY - 15-30 trades/day           |
-//|                     Version 6.4 - FULLY COMPILABLE              |
+//|                     Version 6.8                                 |
 //+------------------------------------------------------------------+
 #property copyright "Liquidity Sweep EA"
-#property version   "6.40"
+#property version   "6.80"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -289,7 +289,7 @@ int OnInit()
       CreateDashboard();
 
    Print("========================================");
-   Print("LIQUIDITY SWEEP EA v6.4 - HIGH FREQUENCY");
+   Print("LIQUIDITY SWEEP EA v6.8 - HIGH FREQUENCY");
    Print("Monitoring: ", IntegerToString(symbolCnt), " symbols");
    Print("Aggressive Mode: ", EnumToString(InpAggressiveMode));
    Print("Correlation Filter: ", InpUseCorrelationFilter ? "ON (max " + IntegerToString(InpMaxCorrelatedPositions) + ")" : "OFF");
@@ -770,14 +770,14 @@ bool CheckCorrelationLimit(int idx)
 void OnTick()
 {
    UpdateDailyReset();
+   activePositions = CountOpenPositions();
+   if(InpShowDashboard) UpdateDashboard();
    if(globalDailyTrades >= InpMaxDailyTrades) return;
    if(globalDailyR >= InpMaxDailyNetR) return;
    if(globalDailyR <= InpMaxDailyLossR) return;
    // Session is global — check once here, not per-symbol
    if(!CheckSession()) return;
-   activePositions = CountOpenPositions();
    if(activePositions >= InpMaxOpenPositions) return;
-   if(InpShowDashboard) UpdateDashboard();
    for(int i = 0; i < ArraySize(symbols); i++)
    {
       if(!symbols[i].isActive) continue;
@@ -1210,7 +1210,7 @@ int GetPanelX()
 int GetPanelY()
 {
    if(InpDashboardCorner == 2 || InpDashboardCorner == 3)
-      return (int)(ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS) - InpDashboardYOffset - 320);
+      return (int)(ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS) - InpDashboardYOffset - 335);
    return InpDashboardYOffset;
 }
 
@@ -1244,7 +1244,7 @@ void CreateDashboard()
    int x = GetPanelX();
    int y = GetPanelY();
    int width  = 264;
-   int height = 320;
+   int height = 335;
 
    if(ObjectCreate(0, "DB_Rect", OBJ_RECTANGLE_LABEL, 0, 0, 0))
    {
@@ -1275,7 +1275,7 @@ void CreateDashboard()
       ObjectSetInteger(0, "DB_Version", OBJPROP_COLOR,     clrGray);
       ObjectSetInteger(0, "DB_Version", OBJPROP_FONTSIZE,  8);
       ObjectSetString(0,  "DB_Version", OBJPROP_FONT,      "Arial");
-      ObjectSetString(0,  "DB_Version", OBJPROP_TEXT,      "v6.7 HF | BOS: " + EnumToString(InpBOSMode));
+      ObjectSetString(0,  "DB_Version", OBJPROP_TEXT,      "v6.8 | BOS: " + EnumToString(InpBOSMode));
    }
 }
 
@@ -1288,7 +1288,7 @@ void UpdateDashboard()
    // Keep rect anchored correctly after chart resize
    ObjectSetInteger(0, "DB_Rect", OBJPROP_XDISTANCE, x);
    ObjectSetInteger(0, "DB_Rect", OBJPROP_YDISTANCE, y);
-   ObjectSetInteger(0, "DB_Rect", OBJPROP_YSIZE,     320);
+   ObjectSetInteger(0, "DB_Rect", OBJPROP_YSIZE,     335);
    ObjectSetInteger(0, "DB_Title",   OBJPROP_XDISTANCE, x + 8);
    ObjectSetInteger(0, "DB_Title",   OBJPROP_YDISTANCE, y + 4);
    ObjectSetInteger(0, "DB_Version", OBJPROP_XDISTANCE, x + 8);
@@ -1304,6 +1304,15 @@ void UpdateDashboard()
       case AGGRESSIVE_ULTRA:  modeText = "ULTRA";        break;
    }
    CreateOrUpdateLabel("DB_Mode", x + 8, y + line, 0, clrCyan, "Mode: " + modeText);
+   line += 15;
+   string statusText = "RUNNING";
+   color statusColor = clrLimeGreen;
+   if(globalDailyTrades >= InpMaxDailyTrades)      { statusText = "PAUSED: Daily trade limit";  statusColor = clrOrange; }
+   else if(globalDailyR >= InpMaxDailyNetR)        { statusText = "PAUSED: Daily target hit";   statusColor = clrOrange; }
+   else if(globalDailyR <= InpMaxDailyLossR)       { statusText = "PAUSED: Daily loss limit";   statusColor = clrRed;    }
+   else if(!CheckSession())                        { statusText = "PAUSED: Outside session";    statusColor = clrGray;   }
+   else if(activePositions >= InpMaxOpenPositions) { statusText = "PAUSED: Max open positions"; statusColor = clrOrange; }
+   CreateOrUpdateLabel("DB_Status", x + 8, y + line, 0, statusColor, "Status: " + statusText);
    line += 15;
    CreateOrUpdateLabel("DB_Trades", x + 8, y + line, 0, clrWhite,
       "Trades: " + IntegerToString(globalDailyTrades) + "/" + IntegerToString(InpMaxDailyTrades));
