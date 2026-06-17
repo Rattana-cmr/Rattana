@@ -1,10 +1,10 @@
 //+------------------------------------------------------------------+
 //|                                LiquiditySweep_Reversal_EA.mq5    |
 //|                     HIGH FREQUENCY - 15-30 trades/day           |
-//|                     Version 7.3                                 |
+//|                     Version 7.2                                 |
 //+------------------------------------------------------------------+
 #property copyright "Liquidity Sweep EA"
-#property version   "7.30"
+#property version   "7.20"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -63,7 +63,6 @@ input double   InpSweepMinPips   = 3.0;
 
 input group "=== Entry & Risk Settings ==="
 input double   InpRiskPercent    = 0.3;
-input double   InpFixedLotSize   = 0.0;  // 0 = auto-calculate from risk%; otherwise use this fixed lot size
 input double   InpSlBufferPips   = 2.0;
 input double   InpMaxSlippage    = 5;
 input bool     InpUseFVG         = false;
@@ -302,7 +301,7 @@ int OnInit()
       CreateDashboard();
 
    Print("========================================");
-   Print("LIQUIDITY SWEEP EA v7.3 - HIGH FREQUENCY");
+   Print("LIQUIDITY SWEEP EA v7.2 - HIGH FREQUENCY");
    Print("Monitoring: ", IntegerToString(symbolCnt), " symbols");
    Print("Aggressive Mode: ", EnumToString(InpAggressiveMode));
    Print("Correlation Filter: ", InpUseCorrelationFilter ? "ON (max " + IntegerToString(InpMaxCorrelatedPositions) + ")" : "OFF");
@@ -1098,20 +1097,13 @@ bool CheckRiskAndEntry(int idx)
    double ticks = riskDistance / tickSize;
    double lossPerLot = ticks * tickValue;
    if(lossPerLot <= 0) return false;
-   if(InpFixedLotSize > 0)
-   {
-      symbols[idx].totalLot = InpFixedLotSize;
-   }
-   else
-   {
-      double riskPercent = InpRiskPercent;
-      if(consecutiveLosses >= 5) riskPercent = InpRiskPercent * 0.25;
-      else if(consecutiveLosses >= 3) riskPercent = InpRiskPercent * 0.5;
-      double riskMoney = (riskPercent / 100.0) * AccountInfoDouble(ACCOUNT_BALANCE);
-      symbols[idx].totalLot = riskMoney / lossPerLot;
-   }
+   double riskPercent = InpRiskPercent;
+   if(consecutiveLosses >= 5) riskPercent = InpRiskPercent * 0.25;
+   else if(consecutiveLosses >= 3) riskPercent = InpRiskPercent * 0.5;
+   double riskMoney = (riskPercent / 100.0) * AccountInfoDouble(ACCOUNT_BALANCE);
+   symbols[idx].totalLot = riskMoney / lossPerLot;
+   symbols[idx].riskAmount = riskMoney;
    symbols[idx].totalLot = NormalizeLot(idx, symbols[idx].totalLot);
-   symbols[idx].riskAmount = symbols[idx].totalLot * lossPerLot;
    return (symbols[idx].totalLot > 0);
 }
 
@@ -1294,17 +1286,6 @@ void CreateOrUpdateLabel(string name, int x, int y, int corner, color clr, strin
    ObjectSetString(0, name, OBJPROP_TEXT, text);
 }
 
-string BOSModeText(ENUM_BOS_MODE mode)
-{
-   switch(mode)
-   {
-      case BOS_NORMAL:  return "Bos_Normal";
-      case BOS_RELAXED: return "Bos_Relaxed";
-      case BOS_BYPASS:  return "Bos_Bypass";
-   }
-   return EnumToString(mode);
-}
-
 //+------------------------------------------------------------------+
 //| Dashboard create / update                                        |
 //+------------------------------------------------------------------+
@@ -1342,10 +1323,10 @@ void CreateDashboard()
       ObjectSetInteger(0, "DB_Version", OBJPROP_CORNER,    CORNER_LEFT_UPPER);
       ObjectSetInteger(0, "DB_Version", OBJPROP_XDISTANCE, x + 8);
       ObjectSetInteger(0, "DB_Version", OBJPROP_YDISTANCE, y + 18);
-      ObjectSetInteger(0, "DB_Version", OBJPROP_COLOR,     clrWhite);
-      ObjectSetInteger(0, "DB_Version", OBJPROP_FONTSIZE,  7);
+      ObjectSetInteger(0, "DB_Version", OBJPROP_COLOR,     clrGray);
+      ObjectSetInteger(0, "DB_Version", OBJPROP_FONTSIZE,  8);
       ObjectSetString(0,  "DB_Version", OBJPROP_FONT,      "Arial");
-      ObjectSetString(0,  "DB_Version", OBJPROP_TEXT,      "V7.3 BOS: " + BOSModeText(InpBOSMode));
+      ObjectSetString(0,  "DB_Version", OBJPROP_TEXT,      "V7.2 | BOS: " + EnumToString(InpBOSMode));
    }
 }
 
