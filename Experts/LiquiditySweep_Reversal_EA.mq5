@@ -1,10 +1,10 @@
 //+------------------------------------------------------------------+
 //|                                LiquiditySweep_Reversal_EA.mq5    |
 //|                     HIGH FREQUENCY - 15-30 trades/day           |
-//|                     Version 6.8                                 |
+//|                     Version 6.9                                 |
 //+------------------------------------------------------------------+
 #property copyright "Liquidity Sweep EA"
-#property version   "6.80"
+#property version   "6.90"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -289,7 +289,7 @@ int OnInit()
       CreateDashboard();
 
    Print("========================================");
-   Print("LIQUIDITY SWEEP EA v6.8 - HIGH FREQUENCY");
+   Print("LIQUIDITY SWEEP EA v6.9 - HIGH FREQUENCY");
    Print("Monitoring: ", IntegerToString(symbolCnt), " symbols");
    Print("Aggressive Mode: ", EnumToString(InpAggressiveMode));
    Print("Correlation Filter: ", InpUseCorrelationFilter ? "ON (max " + IntegerToString(InpMaxCorrelatedPositions) + ")" : "OFF");
@@ -616,6 +616,10 @@ double FindLiquidityPoolLevel(int idx, bool findHigh, ENUM_TIMEFRAMES tf)
    }
    int minCluster = (InpAggressiveMode >= AGGRESSIVE_MEDIUM) ? 2 : 3;
    if(bestClusterSize >= minCluster) return bestLevel;
+   // ULTRA: no repeated level found in the lookback window — fall back to the
+   // single most extreme high/low so the funnel never stalls at pool detection
+   if(InpAggressiveMode == AGGRESSIVE_ULTRA)
+      return findHigh ? arr[ArrayMaximum(arr)] : arr[ArrayMinimum(arr)];
    return 0;
 }
 
@@ -1275,7 +1279,7 @@ void CreateDashboard()
       ObjectSetInteger(0, "DB_Version", OBJPROP_COLOR,     clrGray);
       ObjectSetInteger(0, "DB_Version", OBJPROP_FONTSIZE,  8);
       ObjectSetString(0,  "DB_Version", OBJPROP_FONT,      "Arial");
-      ObjectSetString(0,  "DB_Version", OBJPROP_TEXT,      "v6.8 | BOS: " + EnumToString(InpBOSMode));
+      ObjectSetString(0,  "DB_Version", OBJPROP_TEXT,      "v6.9 | BOS: " + EnumToString(InpBOSMode));
    }
 }
 
