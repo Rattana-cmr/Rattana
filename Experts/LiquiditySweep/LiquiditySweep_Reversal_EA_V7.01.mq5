@@ -1,10 +1,10 @@
 //+------------------------------------------------------------------+
 //|                                LiquiditySweep_Reversal_EA.mq5    |
 //|                     HIGH FREQUENCY - 15-30 trades/day           |
-//|                     Version 7.2                                 |
+//|                     Version 7.1                                 |
 //+------------------------------------------------------------------+
 #property copyright "Liquidity Sweep EA"
-#property version   "7.20"
+#property version   "7.10"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -75,8 +75,8 @@ input double   InpMaxSlPips      = 15.0;  // Hard SL cap in pips (0 = no cap)
 input group "=== Trade Management ==="
 input int      InpMaxDailyTrades  = 0;  // 0 = unlimited (trade continuously until market/session close)
 input int      InpMaxTradesPerSymbol = 0;  // per-symbol daily cap (0 = auto from global/symbols)
-input double   InpMaxDailyNetR    = 8.0;  // informational target only — no longer pauses trading
-input double   InpMaxDailyLossR   = -3.0;  // safety stop — trading pauses for the day if hit
+input double   InpMaxDailyNetR    = 8.0;
+input double   InpMaxDailyLossR   = -3.0;
 input int      InpMaxOpenPositions = 12;
 input int      InpMaxCorrelatedPositions = 10;
 input bool     InpUseCorrelationFilter = false;
@@ -301,7 +301,7 @@ int OnInit()
       CreateDashboard();
 
    Print("========================================");
-   Print("LIQUIDITY SWEEP EA v7.2 - HIGH FREQUENCY");
+   Print("LIQUIDITY SWEEP EA v7.1 - HIGH FREQUENCY");
    Print("Monitoring: ", IntegerToString(symbolCnt), " symbols");
    Print("Aggressive Mode: ", EnumToString(InpAggressiveMode));
    Print("Correlation Filter: ", InpUseCorrelationFilter ? "ON (max " + IntegerToString(InpMaxCorrelatedPositions) + ")" : "OFF");
@@ -823,8 +823,7 @@ void OnTick()
 
    if(InpShowDashboard) UpdateDashboard();
    if(InpMaxDailyTrades > 0 && globalDailyTrades >= InpMaxDailyTrades) return;
-   // InpMaxDailyNetR is informational only — hitting the target no longer
-   // pauses trading; only the loss limit below and a manual stop do.
+   if(globalDailyR >= InpMaxDailyNetR) return;
    if(globalDailyR <= InpMaxDailyLossR) return;
    // Session is global — check once here, not per-symbol
    if(!CheckSession()) return;
@@ -1326,7 +1325,7 @@ void CreateDashboard()
       ObjectSetInteger(0, "DB_Version", OBJPROP_COLOR,     clrGray);
       ObjectSetInteger(0, "DB_Version", OBJPROP_FONTSIZE,  8);
       ObjectSetString(0,  "DB_Version", OBJPROP_FONT,      "Arial");
-      ObjectSetString(0,  "DB_Version", OBJPROP_TEXT,      "V7.2 | BOS: " + EnumToString(InpBOSMode));
+      ObjectSetString(0,  "DB_Version", OBJPROP_TEXT,      "V7.1 | BOS: " + EnumToString(InpBOSMode));
    }
 }
 
@@ -1359,10 +1358,10 @@ void UpdateDashboard()
    string statusText = "RUNNING";
    color statusColor = clrLimeGreen;
    if(InpMaxDailyTrades > 0 && globalDailyTrades >= InpMaxDailyTrades) { statusText = "PAUSED: Daily trade limit";  statusColor = clrOrange; }
+   else if(globalDailyR >= InpMaxDailyNetR)        { statusText = "PAUSED: Daily target hit";   statusColor = clrOrange; }
    else if(globalDailyR <= InpMaxDailyLossR)       { statusText = "PAUSED: Daily loss limit";   statusColor = clrRed;    }
    else if(!CheckSession())                        { statusText = "PAUSED: Outside session";    statusColor = clrGray;   }
    else if(activePositions >= InpMaxOpenPositions) { statusText = "PAUSED: Max open positions"; statusColor = clrOrange; }
-   else if(globalDailyR >= InpMaxDailyNetR)        { statusText = "RUNNING (target hit, no cap)"; statusColor = clrLimeGreen; }
    else                                             { statusText = "RUNNING (" + activeSessionName + ")"; }
    CreateOrUpdateLabel("DB_Status", x + 8, y + line, 0, statusColor, "Status: " + statusText);
    line += 15;
