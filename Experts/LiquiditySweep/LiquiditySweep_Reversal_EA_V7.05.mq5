@@ -1273,7 +1273,7 @@ void ManagePositions(int idx)
 
 #define DB_WIDTH            264
 #define DB_HEIGHT            360  // expanded panel height
-#define DB_HEIGHT_COLLAPSED  44   // title-bar-only height when collapsed
+#define DB_HEIGHT_COLLAPSED  28   // title-bar-only height when collapsed (title only, nothing else)
 
 // Translate InpDashboardCorner + offsets into absolute top-left pixel
 // coords for the panel, then always use CORNER_LEFT_UPPER for every
@@ -1393,14 +1393,14 @@ void UpdateDashboard()
    ObjectSetInteger(0, "DB_Rect", OBJPROP_YDISTANCE, y);
    ObjectSetInteger(0, "DB_Title",   OBJPROP_XDISTANCE, x + 8);
    ObjectSetInteger(0, "DB_Title",   OBJPROP_YDISTANCE, y + 4);
-   ObjectSetInteger(0, "DB_Version", OBJPROP_XDISTANCE, x + 8);
-   ObjectSetInteger(0, "DB_Version", OBJPROP_YDISTANCE, y + 28);
    ObjectSetInteger(0, "DB_Toggle",  OBJPROP_XDISTANCE, x + DB_WIDTH - 26);
    ObjectSetInteger(0, "DB_Toggle",  OBJPROP_YDISTANCE, y + 4);
 
    if(dashboardCollapsed)
    {
+      // Collapsed: show only the title bar - nothing else, including the version line.
       ObjectSetInteger(0, "DB_Rect", OBJPROP_YSIZE, DB_HEIGHT_COLLAPSED);
+      ObjectDelete(0, "DB_Version");
       string bodyLabels[] = {"DB_Mode","DB_Status","DB_Trades","DB_Open","DB_DailyR","DB_WinRate",
          "DB_LossStreak","DB_Sep","DB_StatsTitle","DB_LpFound","DB_SwFound","DB_BosConf",
          "DB_Entries","DB_Rejects","DB_Sep2","DB_SignalsTitle","DB_NoSignals"};
@@ -1410,6 +1410,18 @@ void UpdateDashboard()
          ObjectDelete(0, "DB_Sig" + IntegerToString(s));
       return;
    }
+
+   if(ObjectFind(0, "DB_Version") < 0)
+   {
+      ObjectCreate(0, "DB_Version", OBJ_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, "DB_Version", OBJPROP_CORNER,   CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, "DB_Version", OBJPROP_COLOR,    clrWhite);
+      ObjectSetInteger(0, "DB_Version", OBJPROP_FONTSIZE, 7);
+      ObjectSetString(0,  "DB_Version", OBJPROP_FONT,     "Arial");
+   }
+   ObjectSetInteger(0, "DB_Version", OBJPROP_XDISTANCE, x + 8);
+   ObjectSetInteger(0, "DB_Version", OBJPROP_YDISTANCE, y + 28);
+   ObjectSetString(0,  "DB_Version", OBJPROP_TEXT,      "V7.5 BOS: " + BOSModeText(InpBOSMode));
 
    int line = 40;
    string modeText = "";
