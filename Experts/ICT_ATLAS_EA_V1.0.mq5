@@ -3265,7 +3265,7 @@ void InitMLCSVFiles()
 
    if(MLExportSignals)
    {
-      string fname = "ICT_ATLAS_All_Signals_" + _Symbol + ".csv";
+      string fname = "ICT_ATLAS_All_Signals_" + _Symbol + "_" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + ".csv";
       bool needHeader = isTester;
 
       if(!isTester)
@@ -3313,7 +3313,7 @@ void InitMLCSVFiles()
 
    if(MLExportTrades)
    {
-      string fname = "ICT_ATLAS_Trade_History_" + _Symbol + ".csv";
+      string fname = "ICT_ATLAS_Trade_History_" + _Symbol + "_" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + ".csv";
       bool needHeader = isTester;
 
       if(!isTester)
