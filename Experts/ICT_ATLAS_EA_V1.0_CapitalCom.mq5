@@ -1388,12 +1388,19 @@ bool PriceInFVG(bool bullish, double& fvgTop, double& fvgBot, double& fvgCE)
       }
       else tooFar++;
    }
-   if(DebugLogs && checked > 0)
-      Print(StringFormat("FVG check: %d %s FVGs active, price=%.5f outside all zones (%d too far)",
-            checked, bullish?"BULL":"BEAR", curC, tooFar));
-   else if(DebugLogs && checked == 0 && gFVGCount > 0)
-      Print(StringFormat("FVG check: no valid %s FVGs (%d wrong dir, %d mitigated)",
-            bullish?"BULL":"BEAR", wrongDir, mitigated));
+   static datetime lastFVGLogBar[2] = {0, 0};
+   datetime curBar = iTime(_Symbol, PERIOD_M15, 0);
+   int dirIdx = bullish ? 1 : 0;
+   if(DebugLogs && curBar != lastFVGLogBar[dirIdx])
+   {
+      if(checked > 0)
+         Print(StringFormat("FVG check: %d %s FVGs active, price=%.5f outside all zones (%d too far)",
+               checked, bullish?"BULL":"BEAR", curC, tooFar));
+      else if(checked == 0 && gFVGCount > 0)
+         Print(StringFormat("FVG check: no valid %s FVGs (%d wrong dir, %d mitigated)",
+               bullish?"BULL":"BEAR", wrongDir, mitigated));
+      lastFVGLogBar[dirIdx] = curBar;
+   }
    return false;
 }
 
@@ -2182,7 +2189,14 @@ bool ValidateSetup(bool bullish)
    if(UseLiquidityEngine && !sweepOK && !contOK)
    {
       AddFailReason("Liq Sweep: Missing");
-      if(DebugLogs) Print("SETUP BLOCKED: No liquidity sweep for ",bullish?"BULL":"BEAR");
+      static datetime lastSweepLogBar[2] = {0, 0};
+      datetime curBar = iTime(_Symbol, PERIOD_M15, 0);
+      int dirIdx = bullish ? 1 : 0;
+      if(DebugLogs && curBar != lastSweepLogBar[dirIdx])
+      {
+         Print("SETUP BLOCKED: No liquidity sweep for ",bullish?"BULL":"BEAR");
+         lastSweepLogBar[dirIdx] = curBar;
+      }
       return false;
    }
 
