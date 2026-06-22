@@ -624,6 +624,7 @@ datetime      gLastBarM15  = 0;
 datetime      gLastBarD1   = 0;
 datetime      gLastBarW1   = 0;
 datetime      gLastTradeClose = 0;
+datetime      gLastFailedOrderTime = 0;  // throttle: last broker order rejection
 int           gLastTradeDay   = -1;
 int           gLastTradeWeek  = -1;  // Weekly reset tracker
 
@@ -2245,6 +2246,13 @@ bool ValidateSetup(bool bullish)
 
 bool PlaceTrade(bool bullish)
 {
+   // Throttle retries after a broker rejection (e.g. not enough money) — without
+   // this, CheckForEntry() (which runs every tick) would resend the same order
+   // every tick while the setup remains valid, spamming the trade server.
+   const int FAILED_ORDER_RETRY_SEC = 30;
+   if(gLastFailedOrderTime > 0 && (TimeCurrent() - gLastFailedOrderTime) < FAILED_ORDER_RETRY_SEC)
+      return false;
+
    bool aggrMode = AggressiveMode || ScalperMode;
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
@@ -2325,6 +2333,7 @@ bool PlaceTrade(bool bullish)
    if(!ok)
    {
       Print("TRADE BLOCKED: Order rejected — ", Trade.ResultRetcodeDescription());
+      gLastFailedOrderTime = TimeCurrent();
       return false;
    }
 
