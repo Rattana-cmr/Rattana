@@ -37,7 +37,6 @@
 // ═══════════════════════════════════════════════════════════════════
 
 #property copyright "RATTANA CHHORM"
-#property version   "1.1"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -126,6 +125,15 @@ input bool     RequireLiquiditySweep    = false;  // [4] Require liquidity sweep
 input bool     UseSMTFilter             = false;  // SMT divergence (default OFF)
 input string   SMTSymbol                = "XAGUSD"; // Correlated symbol for SMT
 
+//--- AI SIGNAL FILTER ---------------------------------------------
+input group "========== AI SIGNAL FILTER =========="
+input bool   UseAIFilter          = false;   // Enable AI signal reading from Python bridge
+input bool   AIRequireSignal      = false;   // true = block trades when no AI signal file
+input string AISignalFile         = "ICT_SMC_AI_Signal.txt";  // Python writes predictions here
+input string AIRequestFile        = "ICT_SMC_AI_Request.txt"; // EA writes market state here
+input double AIMinConfidence      = 0.65;    // Minimum AI confidence (0.0-1.0) to allow trade
+input int    AISignalMaxAgeMin    = 5;       // Max age of AI signal in minutes before stale
+
 //--- NEWS FILTER ---------------------------------------------------
 input group "========== NEWS FILTER =========="
 input bool     UseNewsFilter            = false;  // Block trading during high-impact news
@@ -213,6 +221,7 @@ input bool     UseDailyTrendFilter      = true;
 input bool     BestHoursOnly            = true;   // FIX N: 08:30-15:00 GMT
 input bool     ForceTrades              = false;
 input bool     DebugMode                = false;
+input bool     EnableEntryReport     = false; // [V1.7] Print per-bar ENTRY REJECTED detail to journal
 input bool     RelaxedMode              = false;
 
 //===================================================================//
@@ -287,6 +296,18 @@ double sessionPeakEquity    = 0;
 double lastOTEHigh = 0;
 double lastOTELow  = 0;
 
+// AI signal state
+string   aiLastDirection  = "";
+double   aiLastConfidence = 0.0;
+datetime aiLastSignalTime = 0;
+bool     aiSignalValid    = false;
+
+// AI rejection counters
+int    rejAI         = 0;   // daily
+int    cumRejAI      = 0;   // cumulative
+int    cumSetupsDetected = 0; // [V1.7] times CheckTwinsSequence returned true (all filters passed)
+int    cumRejTotal   = 0;   // [V1.3] total bars blocked by any filter
+
 // Effective parameters (may be overridden by preset/opt mode)
 double effOTEMin      = 0.65;
 double effOTEMax      = 0.75;
@@ -311,6 +332,14 @@ color    PANEL_GOLD      = clrGold;
 color    PANEL_BLUE      = C'100,160,255';
 bool     panelDragging   = false;
 bool     panelHidden     = false;
+bool     panelDirty      = false;
+bool     secBrokerHidden = false;
+bool     secSeqHidden    = false;
+bool     secSwingsHidden = false;
+bool     secSessHidden   = false;
+bool     secStatsHidden  = false;
+bool     secDDHidden     = false;
+bool     secConfigHidden = false;
 int      dragOffsetX     = 0;
 int      dragOffsetY     = 0;
 
@@ -810,6 +839,7 @@ int CalculateTradeScore(bool isBuy)
    if(fvgR==0||(fvgCount1Min>=0&&fvgCount1Min>=fvgR)) s+=15;
    s+=15; // OTE always confirmed here
    if(IsTrendAligned(isBuy)) s+=10;
+   s+=GetAIScoreBonus(isBuy);  // AI confidence bonus: 0-20 pts
    return s;
 }
 
@@ -834,6 +864,67 @@ bool IsBrokerOrderSafe(bool isBuy,double entry,double sl,double tp,string &reaso
 
    reason=""; return true;
 }
+
+//===================================================================//
+//  AI SIGNAL BRIDGE
+//  EA writes market state → Python ML model reads + writes prediction
+//  → EA reads prediction and uses as score bonus / hard gate
+//===================================================================//
+void WriteAIRequest(bool isBuy)
+{
+   if(!UseAIFilter) return;
+   int fh=FileOpen(AIRequestFile,FILE_WRITE|FILE_TXT|FILE_COMMON);
+   if(fh==INVALID_HANDLE) return;
+   double atrPips=GetATR()/_Point/PipFactor;
+   double spread=(SymbolInfoDouble(_Symbol,SYMBOL_ASK)-SymbolInfoDouble(_Symbol,SYMBOL_BID))/_Point/PipFactor;
+   double otePos=0;
+   if(lastSwingHighH1>0&&lastSwingLowH1>0)
+   { double rng=lastSwingHighH1-lastSwingLowH1;
+     if(rng>0) otePos=(SymbolInfoDouble(_Symbol,SYMBOL_BID)-lastSwingLowH1)/rng; }
+   MqlDateTime dt; TimeToStruct(TimeCurrent(),dt);
+   string sess=InLondonNYOverlap()?"OVERLAP":(InLondonSession()?"LONDON":(InNewYorkSession()?"NEWYORK":"OTHER"));
+   FileWriteString(fh,StringFormat("%s,%s,%s,%d,%d,%d,%d,%.4f,%.1f,%.1f,%d,%d,%s\n",
+      TimeToString(TimeCurrent(),TIME_DATE|TIME_MINUTES),_Symbol,
+      isBuy?"BUY":"SELL",
+      (int)mssConfirmed,(int)bosConfirmed,(int)liquiditySweepDone,
+      lastTradeScore,otePos,atrPips,spread,dt.hour,dt.day_of_week,sess));
+   FileClose(fh);
+}
+
+bool ReadAISignal(bool isBuy)
+{
+   aiSignalValid=false; aiLastDirection=""; aiLastConfidence=0.0;
+   if(!UseAIFilter) return true;
+   if(!FileIsExist(AISignalFile,FILE_COMMON)) return false;
+   int fh=FileOpen(AISignalFile,FILE_READ|FILE_TXT|FILE_COMMON);
+   if(fh==INVALID_HANDLE) return false;
+   string line=FileReadString(fh); FileClose(fh);
+   if(StringLen(line)<3) return false;
+   string parts[]; int cnt=StringSplit(line,',',parts);
+   if(cnt<2) return false;
+   string dir=parts[0]; double conf=StringToDouble(parts[1]);
+   if(cnt>=3)
+   { datetime sigTime=StringToTime(parts[2]);
+     if(sigTime>0&&TimeCurrent()-sigTime>(datetime)(AISignalMaxAgeMin*60)) return false;
+     aiLastSignalTime=sigTime; }
+   aiLastDirection=dir; aiLastConfidence=conf; aiSignalValid=true;
+   bool dirOK=(isBuy&&dir=="BUY")||(!isBuy&&dir=="SELL");
+   return(dirOK&&conf>=AIMinConfidence);
+}
+
+int GetAIScoreBonus(bool isBuy)
+{
+   if(!UseAIFilter||!aiSignalValid) return 0;
+   bool dirOK=(isBuy&&aiLastDirection=="BUY")||(!isBuy&&aiLastDirection=="SELL");
+   if(!dirOK) return 0;
+   double range=1.0-AIMinConfidence; if(range<=0) return 20;
+   return(int)MathMax(0,MathMin(20,(aiLastConfidence-AIMinConfidence)/range*20.0));
+}
+
+//===================================================================//
+//  AI REJECTION COUNTER
+//===================================================================//
+void RejAI() { rejAI++; cumRejAI++; }
 
 //===================================================================//
 //  STATE MACHINE — CONTEXT BUILDING (per M15 bar)                   //
@@ -1005,6 +1096,20 @@ bool CheckTwinsSequence(bool &isBuy)
    if(UseDailyTrendFilter&&!IsTrendAligned(isBuy)){ lastFailedStep=10; lastFailedStepDesc="MTF Trend"; return false; }
    if(UseSMTFilter&&!CheckSMTDivergence(isBuy))    { lastFailedStep=10; lastFailedStepDesc="SMT Divergence"; return false; }
    if(IsNewsTime())                                  { lastFailedStep=10; lastFailedStepDesc="News Blocked"; return false; }
+
+   // AI filter: write request, read signal, gate/bonus
+   if(UseAIFilter)
+   { WriteAIRequest(isBuy);
+     bool aiOK=ReadAISignal(isBuy);
+     if(!aiOK)
+     { bool shouldBlock=aiSignalValid||AIRequireSignal;
+       if(shouldBlock)
+       { RejAI();
+         lastFailedStep=11;
+         lastFailedStepDesc=aiSignalValid?
+            "AI Filter (conf:"+DoubleToString(aiLastConfidence,2)+")":
+            "AI: No Signal";
+         return false; } } }
 
    int score=CalculateTradeScore(isBuy);
    lastTradeScore=score;
@@ -1282,6 +1387,26 @@ void PlaceTrade(bool isBuy=true)
          GlobalVariableSet("TWINS_RR_"+IntegerToString(posID),actualRR);
          Print("TRADE PLACED OK | R:R=",DoubleToString(actualRR,2)," | PosID=",posID);
          WriteCSVLog("OPEN",posID,isBuy,entry,sl,tp,volume,0,lastTradeScore,"Score:"+IntegerToString(lastTradeScore));
+         string _p=IntegerToString(posID);
+         GlobalVariableSet("ICTSMC_DIR_"+_p,isBuy?1:0);
+         GlobalVariableSet("ICTSMC_OT_"+_p,(double)TimeCurrent());
+         GlobalVariableSet("ICTSMC_EN_"+_p,entry);
+         GlobalVariableSet("ICTSMC_SL_"+_p,sl);
+         GlobalVariableSet("ICTSMC_TP_"+_p,tp);
+         GlobalVariableSet("ICTSMC_SLP_"+_p,slPoints);
+         GlobalVariableSet("ICTSMC_LOT_"+_p,volume);
+         double _ote=0;if(lastSwingHighH1>0&&lastSwingLowH1>0){double _r=lastSwingHighH1-lastSwingLowH1;if(_r>0)_ote=(entry-lastSwingLowH1)/_r*100.0;}
+         GlobalVariableSet("ICTSMC_OTE_"+_p,_ote);
+         int _si=InLondonNYOverlap()?3:(InLondonSession()?1:(InNewYorkSession()?2:(InTokyoSession()?4:(InSydneySession()?5:0))));
+         MqlDateTime _dt;TimeToStruct(TimeCurrent(),_dt);
+         GlobalVariableSet("ICTSMC_SES_"+_p,_si);
+         GlobalVariableSet("ICTSMC_HR_"+_p,_dt.hour);
+         GlobalVariableSet("ICTSMC_DOW_"+_p,_dt.day_of_week);
+         GlobalVariableSet("ICTSMC_SC_"+_p,lastTradeScore);
+         GlobalVariableSet("ICTSMC_AIC_"+_p,UseAIFilter?aiLastConfidence:0.0);
+         GlobalVariableSet("ICTSMC_MSS_"+_p,mssConfirmed?1:0);
+         GlobalVariableSet("ICTSMC_BOS_"+_p,bosConfirmed?1:0);
+         GlobalVariableSet("ICTSMC_LSW_"+_p,liquiditySweepDone?1:0);
       }
       TakeScreenshot(isBuy?"BUY_OPEN":"SELL_OPEN");
    }
@@ -1412,6 +1537,8 @@ void PanelSavePosition()
    GlobalVariableSet(PANEL_PREFIX+"PX",PANEL_X);
    GlobalVariableSet(PANEL_PREFIX+"PY",PANEL_Y);
 }
+void SaveSectionStates(){GlobalVariableSet(PANEL_PREFIX+"SecBk",secBrokerHidden?1:0);GlobalVariableSet(PANEL_PREFIX+"SecSeq",secSeqHidden?1:0);GlobalVariableSet(PANEL_PREFIX+"SecSw",secSwingsHidden?1:0);GlobalVariableSet(PANEL_PREFIX+"SecSs",secSessHidden?1:0);GlobalVariableSet(PANEL_PREFIX+"SecSt",secStatsHidden?1:0);GlobalVariableSet(PANEL_PREFIX+"SecDD",secDDHidden?1:0);GlobalVariableSet(PANEL_PREFIX+"SecCfg",secConfigHidden?1:0);}
+void LoadSectionStates(){if(GlobalVariableCheck(PANEL_PREFIX+"SecBk"))secBrokerHidden=GlobalVariableGet(PANEL_PREFIX+"SecBk")>0.5;if(GlobalVariableCheck(PANEL_PREFIX+"SecSeq"))secSeqHidden=GlobalVariableGet(PANEL_PREFIX+"SecSeq")>0.5;if(GlobalVariableCheck(PANEL_PREFIX+"SecSw"))secSwingsHidden=GlobalVariableGet(PANEL_PREFIX+"SecSw")>0.5;if(GlobalVariableCheck(PANEL_PREFIX+"SecSs"))secSessHidden=GlobalVariableGet(PANEL_PREFIX+"SecSs")>0.5;if(GlobalVariableCheck(PANEL_PREFIX+"SecSt"))secStatsHidden=GlobalVariableGet(PANEL_PREFIX+"SecSt")>0.5;if(GlobalVariableCheck(PANEL_PREFIX+"SecDD"))secDDHidden=GlobalVariableGet(PANEL_PREFIX+"SecDD")>0.5;if(GlobalVariableCheck(PANEL_PREFIX+"SecCfg"))secConfigHidden=GlobalVariableGet(PANEL_PREFIX+"SecCfg")>0.5;}
 void PanelDeleteAll(){ ObjectsDeleteAll(0,PANEL_PREFIX); Comment(""); }
 void PanelDeleteBody()
 {
@@ -1456,8 +1583,8 @@ void PanelLabelC(string name,int y,string text,color clr,int fontSize=8,string f
    if(ObjectFind(0,full)<0)
    { ObjectCreate(0,full,OBJ_LABEL,0,0,0);
      ObjectSetInteger(0,full,OBJPROP_SELECTABLE,false); ObjectSetInteger(0,full,OBJPROP_HIDDEN,true);
-     ObjectSetInteger(0,full,OBJPROP_CORNER,CORNER_LEFT_UPPER);
-     ObjectSetInteger(0,full,OBJPROP_ANCHOR,ANCHOR_UPPER); }
+     ObjectSetInteger(0,full,OBJPROP_CORNER,CORNER_LEFT_UPPER); }
+   ObjectSetInteger(0,full,OBJPROP_ANCHOR,ANCHOR_UPPER);
    ObjectSetInteger(0,full,OBJPROP_XDISTANCE,cx); ObjectSetInteger(0,full,OBJPROP_YDISTANCE,y);
    ObjectSetString (0,full,OBJPROP_TEXT,text);     ObjectSetInteger(0,full,OBJPROP_COLOR,clr);
    ObjectSetInteger(0,full,OBJPROP_FONTSIZE,fontSize); ObjectSetString(0,full,OBJPROP_FONT,font);
@@ -1532,6 +1659,9 @@ void UpdateDisplay()
 
    if(panelHidden){ ChartRedraw(0); return; }
 
+   LoadSectionStates();
+   if(panelDirty){ PanelDeleteBody(); panelDirty=false; }
+
    // Body — BG already created above, just update header overlay and labels
    int y=yb+hdrH;
    PanelRect  ("HdrBG", x,yb,w,hdrH,PANEL_HDR_BG,PANEL_BORDER);
@@ -1540,6 +1670,7 @@ void UpdateDisplay()
    PanelLabel ("ToggleBtn",x+w-50,yb+4,"[hide]",PANEL_BLUE,8);
    PanelLabel ("Header",   px,   yb+4,"[drag]",C'50,50,70',7);
 
+   int bx=x+w-28;
    row=0;
 
    PanelLabel("BalL",px,y+row*lh+rowTop,"Balance  :",PANEL_TXT);
@@ -1548,8 +1679,10 @@ void UpdateDisplay()
    PanelLabel("EqL", px,y+row*lh+rowTop,"Equity   :",PANEL_TXT);
    PanelLabel("EqV", vx,y+row*lh+rowTop,"$"+DoubleToString(equity,2)+"  (P/L:$"+DoubleToString(pnl,2)+")",eqClr); row++;
 
-   // Broker Time (auto-detected, DST-aware)
-   PanelLabel("BkHd",px,y+row*lh+rowTop,"BROKER TIME:",PANEL_GOLD); row++;
+   // ── BROKER TIME ──
+   PanelLabel("BkHd",px,y+row*lh+rowTop,"BROKER TIME:",PANEL_GOLD);
+   {string _b=PANEL_PREFIX+"SecBkBtn";PanelLabel("SecBkBtn",bx,y+row*lh+rowTop,secBrokerHidden?"[+]":"[-]",PANEL_BLUE,8);ObjectSetInteger(0,_b,OBJPROP_SELECTABLE,true);} row++;
+   if(!secBrokerHidden){
    PanelLabel("BkSl",px,y+row*lh+rowTop,"Server Time:",PANEL_TXT);
    PanelLabel("BkSv",vx,y+row*lh+rowTop,srvTimeStr,PANEL_TXT); row++;
    PanelLabel("BkGl",px,y+row*lh+rowTop,"GMT Time   :",PANEL_TXT);
@@ -1557,7 +1690,6 @@ void UpdateDisplay()
    PanelLabel("BkOl",px,y+row*lh+rowTop,"GMT Offset :",PANEL_TXT);
    string offDisp=offsetLabel+(offsetMatch?"":" [input:"+IntegerToString(BrokerGMTOffset)+"]");
    PanelLabel("BkOv",vx,y+row*lh+rowTop,offDisp,offsetMatch?PANEL_GOLD:PANEL_RED); row++;
-
    PanelLabel("SeL",px,y+row*lh+rowTop,"Session  :",PANEL_TXT);
    PanelLabel("SeV",vx,y+row*lh+rowTop,inSess?"ACTIVE":"CLOSED",inSess?PANEL_GREEN:PANEL_RED); row++;
    PanelLabel("TrL",px,y+row*lh+rowTop,"Trend    :",PANEL_TXT);
@@ -1577,9 +1709,12 @@ void UpdateDisplay()
    PanelLabel("CLv",vx,y+row*lh+rowTop,IntegerToString(consecutiveLosses)+"/"+IntegerToString(MaxConsecutiveLosses),consecutiveLosses>5?PANEL_RED:PANEL_TXT); row++;
    PanelLabel("WSl",px,y+row*lh+rowTop,"WinStreak:",PANEL_TXT);
    PanelLabel("WSv",vx,y+row*lh+rowTop,IntegerToString(consecutiveWins),consecutiveWins>0?PANEL_GREEN:PANEL_TXT); row++;
+   }
 
-   // ICT V1.1 Context Sequence
-   PanelLabel("SeqH",px,y+row*lh+rowTop,"ICT SMC V1.1 SEQUENCE:",PANEL_GOLD); row++;
+   // ── ICT V1.1 SEQUENCE ──
+   PanelLabel("SeqH",px,y+row*lh+rowTop,"ICT SMC V1.1 SEQUENCE:",PANEL_GOLD);
+   {string _b=PANEL_PREFIX+"SecSeqBtn";PanelLabel("SecSeqBtn",bx,y+row*lh+rowTop,secSeqHidden?"[+]":"[-]",PANEL_BLUE,8);ObjectSetInteger(0,_b,OBJPROP_SELECTABLE,true);} row++;
+   if(!secSeqHidden){
 
    string s1v=!HTFLevelRequired?"DISABLED":(htfLevelReached?"PASS":"WAIT");
    color  s1c=!HTFLevelRequired?PANEL_GOLD:(htfLevelReached?PANEL_GREEN:PANEL_TXT);
@@ -1638,15 +1773,36 @@ void UpdateDisplay()
    PanelLabel("LBl",px,y+row*lh+rowTop,"Last Block   :",PANEL_TXT);
    PanelLabel("LBv",vx,y+row*lh+rowTop,lbv,lastFailedStep>0?PANEL_GOLD:PANEL_GREEN); row++;
 
-   // Swings
-   PanelLabel("SwH",px,y+row*lh+rowTop,"SWINGS:",PANEL_GOLD); row++;
+   if(UseAIFilter)
+   { PanelLabel("AIH",px,y+row*lh+rowTop,"-- AI SIGNAL --",C'60,40,80'); row++;
+     string aiSt="OFF"; color aiC=PANEL_TXT;
+     if(!aiSignalValid){ aiSt="NO SIGNAL"; aiC=PANEL_RED; }
+     else
+     { int ageSec=(int)(TimeCurrent()-aiLastSignalTime);
+       string ageStr=ageSec<60?IntegerToString(ageSec)+"s":IntegerToString(ageSec/60)+"m";
+       aiSt=aiLastDirection+" conf="+DoubleToString(aiLastConfidence,2)+" ("+ageStr+" ago)";
+       aiC=(aiLastDirection=="BUY")?PANEL_GREEN:PANEL_RED; }
+     PanelLabel("AIl",px,y+row*lh+rowTop,"AI Signal    :",PANEL_TXT); PanelLabel("AIv",vx,y+row*lh+rowTop,aiSt,aiC); row++;
+     string aiCfg="min conf="+DoubleToString(AIMinConfidence,2)+" | stale>"+IntegerToString(AISignalMaxAgeMin)+"m"+(AIRequireSignal?" | REQUIRED":"");
+     PanelLabel("AICl",px,y+row*lh+rowTop,"AI Config    :",PANEL_TXT); PanelLabel("AICv",vx,y+row*lh+rowTop,aiCfg,C'150,100,200'); row++;
+     PanelLabel("AIRl",px,y+row*lh+rowTop,"AI Blocks    :",PANEL_TXT); PanelLabel("AIRv",vx,y+row*lh+rowTop,IntegerToString(rejAI)+" (cum:"+IntegerToString(cumRejAI)+")",cumRejAI>0?PANEL_RED:PANEL_TXT); row++;
+   }
+   }
+
+   // ── SWINGS ──
+   PanelLabel("SwH",px,y+row*lh+rowTop,"SWINGS:",PANEL_GOLD);
+   {string _b=PANEL_PREFIX+"SecSwBtn";PanelLabel("SecSwBtn",bx,y+row*lh+rowTop,secSwingsHidden?"[+]":"[-]",PANEL_BLUE,8);ObjectSetInteger(0,_b,OBJPROP_SELECTABLE,true);} row++;
+   if(!secSwingsHidden){
    PanelLabel("H1l",px,y+row*lh+rowTop,"H1 :",PANEL_TXT);
    PanelLabel("H1v",px+40,y+row*lh+rowTop,"H="+DoubleToString(lastSwingHighH1,_Digits)+"  L="+DoubleToString(lastSwingLowH1,_Digits),PANEL_BLUE); row++;
    PanelLabel("M1l",px,y+row*lh+rowTop,"M15:",PANEL_TXT);
    PanelLabel("M1v",px+40,y+row*lh+rowTop,"H="+DoubleToString(lastSwingHighM15,_Digits)+"  L="+DoubleToString(lastSwingLowM15,_Digits),PANEL_BLUE); row++;
+   }
 
-   // Sessions
-   PanelLabel("SsH",px,y+row*lh+rowTop,"SESSIONS:",PANEL_GOLD); row++;
+   // ── SESSIONS ──
+   PanelLabel("SsH",px,y+row*lh+rowTop,"SESSIONS:",PANEL_GOLD);
+   {string _b=PANEL_PREFIX+"SecSsBtn";PanelLabel("SecSsBtn",bx,y+row*lh+rowTop,secSessHidden?"[+]":"[-]",PANEL_BLUE,8);ObjectSetInteger(0,_b,OBJPROP_SELECTABLE,true);} row++;
+   if(!secSessHidden){
    if(SessionLondon)   { bool a=SessionActiveNow("London");  PanelLabel("SsLl",px,y+row*lh+rowTop,"London  :",PANEL_TXT); PanelLabel("SsLv",vx,y+row*lh+rowTop,"(08-17) "+(a?"ACTIVE":"CLOSED"),a?PANEL_GREEN:PANEL_RED); row++; }
    if(SessionNewYork)  { bool a=SessionActiveNow("NewYork"); PanelLabel("SsNl",px,y+row*lh+rowTop,"New York:",PANEL_TXT); PanelLabel("SsNv",vx,y+row*lh+rowTop,"(13-22) "+(a?"ACTIVE":"CLOSED"),a?PANEL_GREEN:PANEL_RED); row++; }
    if(OverlapLondonNY) { bool a=SessionActiveNow("Overlap"); PanelLabel("SsOl",px,y+row*lh+rowTop,"LDN+NY  :",PANEL_TXT); PanelLabel("SsOv",vx,y+row*lh+rowTop,"(13-17) "+(a?"ACTIVE BEST":"CLOSED"),a?PANEL_GREEN:PANEL_RED); row++; }
@@ -1656,22 +1812,32 @@ void UpdateDisplay()
    PanelLabel("FLv",vx,y+row*lh+rowTop,BestHoursOnly?"08:30 GMT":"(all session)",PANEL_GOLD); row++;
    PanelLabel("FPl",px,y+row*lh+rowTop,"Fri Cutoff :",PANEL_TXT);
    PanelLabel("FPv",vx,y+row*lh+rowTop,CloseOnFriday?(IntegerToString(FridayCloseHour)+":00 GMT"):"OFF",CloseOnFriday?PANEL_GOLD:PANEL_TXT); row++;
+   }
 
-   // Statistics
-   PanelLabel("StH",px,y+row*lh+rowTop,"STATISTICS:",PANEL_GOLD); row++;
+   // ── STATISTICS ──
+   PanelLabel("StH",px,y+row*lh+rowTop,"STATISTICS:",PANEL_GOLD);
+   {string _b=PANEL_PREFIX+"SecStBtn";PanelLabel("SecStBtn",bx,y+row*lh+rowTop,secStatsHidden?"[+]":"[-]",PANEL_BLUE,8);ObjectSetInteger(0,_b,OBJPROP_SELECTABLE,true);} row++;
+   if(!secStatsHidden){
    string trv=IntegerToString(statTotalTrades)+" (W:"+IntegerToString(statWins)+" L:"+IntegerToString(statLosses)+")";
    PanelLabel("StTl",px,y+row*lh+rowTop,"Trades  :",PANEL_TXT); PanelLabel("StTv",vx,y+row*lh+rowTop,trv,PANEL_TXT); row++;
    PanelLabel("WRl", px,y+row*lh+rowTop,"Win Rate:",PANEL_TXT); PanelLabel("WRv",vx,y+row*lh+rowTop,DoubleToString(wr2,1)+"%",wr2>=55?PANEL_GREEN:wr2>=40?PANEL_GOLD:PANEL_RED); row++;
    PanelLabel("ARl", px,y+row*lh+rowTop,"Avg RR  :",PANEL_TXT); PanelLabel("ARv",vx,y+row*lh+rowTop,DoubleToString(avgRR2,2),avgRR2>=1.5?PANEL_GREEN:PANEL_TXT); row++;
    PanelLabel("PFl", px,y+row*lh+rowTop,"Profit F:",PANEL_TXT); PanelLabel("PFv",vx,y+row*lh+rowTop,DoubleToString(pf2,2),pf2>=1.5?PANEL_GREEN:pf2>=1.0?PANEL_GOLD:PANEL_RED); row++;
    PanelLabel("NPl", px,y+row*lh+rowTop,"Net P&L :",PANEL_TXT); PanelLabel("NPv",vx,y+row*lh+rowTop,"$"+DoubleToString(netPnL,2),netPnL>=0?PANEL_GREEN:PANEL_RED); row++;
+   }
 
-   // Drawdown
-   PanelLabel("DDH",px,y+row*lh+rowTop,"DRAWDOWN:",PANEL_GOLD); row++;
+   // ── DRAWDOWN ──
+   PanelLabel("DDH",px,y+row*lh+rowTop,"DRAWDOWN:",PANEL_GOLD);
+   {string _b=PANEL_PREFIX+"SecDDBtn";PanelLabel("SecDDBtn",bx,y+row*lh+rowTop,secDDHidden?"[+]":"[-]",PANEL_BLUE,8);ObjectSetInteger(0,_b,OBJPROP_SELECTABLE,true);} row++;
+   if(!secDDHidden){
    PanelLabel("DCl",px,y+row*lh+rowTop,"Current :",PANEL_TXT); PanelLabel("DCv",vx,y+row*lh+rowTop,"$"+DoubleToString(curDD,2),curDD>0?PANEL_RED:PANEL_GREEN); row++;
    PanelLabel("DMl",px,y+row*lh+rowTop,"Sess Max:",PANEL_TXT); PanelLabel("DMv",vx,y+row*lh+rowTop,"$"+DoubleToString(sessionMaxDrawdown,2),PANEL_TXT); row++;
+   }
 
-   // Config / Risk Settings
+   // ── CONFIG ──
+   PanelLabel("CfgH",px,y+row*lh+rowTop,"CONFIG:",PANEL_GOLD);
+   {string _b=PANEL_PREFIX+"SecCfgBtn";PanelLabel("SecCfgBtn",bx,y+row*lh+rowTop,secConfigHidden?"[+]":"[-]",PANEL_BLUE,8);ObjectSetInteger(0,_b,OBJPROP_SELECTABLE,true);} row++;
+   if(!secConfigHidden){
    PanelLabel("RkL",px,y+row*lh+rowTop,"Risk Mode  :",PANEL_TXT); PanelLabel("RkV",vx,y+row*lh+rowTop,EnumToString(RiskMode)+" "+DoubleToString(effRiskPct,2)+"%",PANEL_GOLD); row++;
    PanelLabel("TpL",px,y+row*lh+rowTop,"TP Mode    :",PANEL_TXT); PanelLabel("TpV",vx,y+row*lh+rowTop,EnumToString(TPMode),PANEL_GOLD); row++;
    PanelLabel("OmL",px,y+row*lh+rowTop,"Opt Mode   :",PANEL_TXT); PanelLabel("OmV",vx,y+row*lh+rowTop,EnumToString(OptMode),PANEL_GOLD); row++;
@@ -1681,6 +1847,7 @@ void UpdateDisplay()
    PanelLabel("DMdl",px,y+row*lh+rowTop,"Debug Mode :",PANEL_TXT); PanelLabel("DMdv",vx,y+row*lh+rowTop,DebugMode?"ON":"OFF",DebugMode?PANEL_GOLD:PANEL_TXT); row++;
    PanelLabel("FTl",px,y+row*lh+rowTop,"ForceTrades:",PANEL_TXT); PanelLabel("FTv",vx,y+row*lh+rowTop,ForceTrades?"ON (TEST)":"OFF",ForceTrades?PANEL_RED:PANEL_GREEN); row++;
    PanelLabel("RMl",px,y+row*lh+rowTop,"RelaxedMode:",PANEL_TXT); PanelLabel("RMv",vx,y+row*lh+rowTop,RelaxedMode?"ON (TEST)":"OFF",RelaxedMode?PANEL_GOLD:PANEL_GREEN); row++;
+   }
 
    int finalH=(y-yb)+row*lh+rowTop+8;
    ObjectSetInteger(0,PANEL_PREFIX+"BG",OBJPROP_YSIZE,finalH);
@@ -1699,6 +1866,21 @@ void OnChartEvent(const int id,const long& lparam,const double& dparam,const str
       if(panelHidden) PanelDeleteBody();
       LastDisplayUpdate=0; UpdateDisplay(); return;
    }
+   // Section collapse/expand buttons
+   if(id==CHARTEVENT_OBJECT_CLICK&&sparam==PANEL_PREFIX+"SecBkBtn")
+   { secBrokerHidden=!secBrokerHidden; panelDirty=true; SaveSectionStates(); LastDisplayUpdate=0; UpdateDisplay(); return; }
+   if(id==CHARTEVENT_OBJECT_CLICK&&sparam==PANEL_PREFIX+"SecSeqBtn")
+   { secSeqHidden=!secSeqHidden; panelDirty=true; SaveSectionStates(); LastDisplayUpdate=0; UpdateDisplay(); return; }
+   if(id==CHARTEVENT_OBJECT_CLICK&&sparam==PANEL_PREFIX+"SecSwBtn")
+   { secSwingsHidden=!secSwingsHidden; panelDirty=true; SaveSectionStates(); LastDisplayUpdate=0; UpdateDisplay(); return; }
+   if(id==CHARTEVENT_OBJECT_CLICK&&sparam==PANEL_PREFIX+"SecSsBtn")
+   { secSessHidden=!secSessHidden; panelDirty=true; SaveSectionStates(); LastDisplayUpdate=0; UpdateDisplay(); return; }
+   if(id==CHARTEVENT_OBJECT_CLICK&&sparam==PANEL_PREFIX+"SecStBtn")
+   { secStatsHidden=!secStatsHidden; panelDirty=true; SaveSectionStates(); LastDisplayUpdate=0; UpdateDisplay(); return; }
+   if(id==CHARTEVENT_OBJECT_CLICK&&sparam==PANEL_PREFIX+"SecDDBtn")
+   { secDDHidden=!secDDHidden; panelDirty=true; SaveSectionStates(); LastDisplayUpdate=0; UpdateDisplay(); return; }
+   if(id==CHARTEVENT_OBJECT_CLICK&&sparam==PANEL_PREFIX+"SecCfgBtn")
+   { secConfigHidden=!secConfigHidden; panelDirty=true; SaveSectionStates(); LastDisplayUpdate=0; UpdateDisplay(); return; }
    if(id==CHARTEVENT_OBJECT_CLICK&&sparam==PANEL_PREFIX+"Header")
    { panelDragging=true; dragOffsetX=(int)lparam-PANEL_X; dragOffsetY=(int)dparam-PANEL_Y; }
    if(id==CHARTEVENT_MOUSE_MOVE&&panelDragging)
@@ -1771,6 +1953,186 @@ int OnInit()
 }
 
 //===================================================================//
+//  [ML] PHASE 1 — SIGNAL LOG  (ICT_SMC_All_Signals_<Symbol>.csv)
+//  One row per M15 bar evaluation: includes rejected AND accepted signals.
+//===================================================================//
+void WriteSignalLog(bool isBuy, bool allowed, string rejReason, int score)
+{ if(!EnableCSVLog) return;
+  string fname="ICT_SMC_All_Signals_"+_Symbol+".csv";
+  int fh=FileOpen(fname,FILE_READ|FILE_WRITE|FILE_CSV|FILE_COMMON,',');
+  if(fh==INVALID_HANDLE) return;
+  if(FileSize(fh)==0)
+    FileWrite(fh,"Timestamp","Symbol","Direction","MSS","BOS","LiqSweep","OTE_Pct",
+      "ATR_Pips","Spread_Pips","Session","Hour","DayOfWeek","Trend","SMT",
+      "CISD_1M","CISD_5M","AI_Bonus","Final_Score","Trade_Allowed","Rejection_Reason");
+  FileSeek(fh,0,SEEK_END);
+  double atrPips=GetATR()/_Point/PipFactor;
+  double spread=(SymbolInfoDouble(_Symbol,SYMBOL_ASK)-SymbolInfoDouble(_Symbol,SYMBOL_BID))/_Point/PipFactor;
+  double otePos=0;
+  if(lastSwingHighH1>0&&lastSwingLowH1>0){double r=lastSwingHighH1-lastSwingLowH1;if(r>0)otePos=(SymbolInfoDouble(_Symbol,SYMBOL_BID)-lastSwingLowH1)/r*100.0;}
+  string sess=InLondonNYOverlap()?"OVERLAP":(InLondonSession()?"LONDON":(InNewYorkSession()?"NEWYORK":(InTokyoSession()?"TOKYO":(InSydneySession()?"SYDNEY":"OTHER"))));
+  MqlDateTime dt; TimeToStruct(TimeCurrent(),dt);
+  string days[7]={"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
+  double fast[1],slow[1]; string trendStr="FLAT";
+  if(CopyBuffer(FastEMAHandle,0,1,1,fast)==1&&CopyBuffer(SlowEMAHandle,0,1,1,slow)==1)
+    trendStr=(fast[0]>slow[0])?"BULL":"BEAR";
+  string smtStr=UseSMTFilter?(CheckSMTDivergence(isBuy)?"PASS":"FAIL"):"OFF";
+  int aiBonus=0; if(UseAIFilter) aiBonus=GetAIScoreBonus(isBuy);
+  FileWrite(fh,
+    TimeToString(TimeCurrent(),TIME_DATE|TIME_MINUTES),_Symbol,isBuy?"BUY":"SELL",
+    mssConfirmed?"1":"0",bosConfirmed?"1":"0",liquiditySweepDone?"1":"0",
+    DoubleToString(otePos,1),DoubleToString(atrPips,1),DoubleToString(spread,1),
+    sess,IntegerToString(dt.hour),days[dt.day_of_week],
+    trendStr,smtStr,
+    cisd1MinConfirmed?"1":"0",cisd5MinConfirmed?"1":"0",
+    IntegerToString(aiBonus),IntegerToString(score),
+    allowed?"YES":"NO",rejReason);
+  FileClose(fh); }
+
+
+
+//===================================================================//
+//  [ML] MFE / MAE TRACKER  — called every tick while position is open
+//===================================================================//
+void UpdateMFEMAE()
+{ for(int i=PositionsTotal()-1;i>=0;i--)
+  { ulong tk=PositionGetTicket(i);
+    if(tk==0||!PositionSelectByTicket(tk)) continue;
+    if(PositionGetString(POSITION_SYMBOL)!=_Symbol||PositionGetInteger(POSITION_MAGIC)!=MAGIC_NUMBER) continue;
+    ENUM_POSITION_TYPE pt=(ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+    double entry=PositionGetDouble(POSITION_PRICE_OPEN);
+    double price=(pt==POSITION_TYPE_BUY)?SymbolInfoDouble(_Symbol,SYMBOL_BID):SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+    ulong posID=(ulong)PositionGetInteger(POSITION_IDENTIFIER);
+    double favPips=(pt==POSITION_TYPE_BUY)?(price-entry)/_Point/PipFactor:(entry-price)/_Point/PipFactor;
+    double advPips=(pt==POSITION_TYPE_BUY)?(entry-price)/_Point/PipFactor:(price-entry)/_Point/PipFactor;
+    string mfeK="ICTSMC_MFE_"+IntegerToString(posID);
+    string maeK="ICTSMC_MAE_"+IntegerToString(posID);
+    if(!GlobalVariableCheck(mfeK)||favPips>GlobalVariableGet(mfeK)) GlobalVariableSet(mfeK,favPips);
+    if(!GlobalVariableCheck(maeK)||advPips>GlobalVariableGet(maeK)) GlobalVariableSet(maeK,advPips); } }
+
+
+
+//===================================================================//
+//  [ML] TRADE HISTORY LOG  (ICT_SMC_Trade_History_<Symbol>.csv)
+//  Written at trade close. Context saved at open via GlobalVariables.
+//===================================================================//
+void WriteTradeHistoryLog(ulong posID, double profit)
+{ if(!EnableCSVLog) return;
+  string fname="ICT_SMC_Trade_History_"+_Symbol+".csv";
+  int fh=FileOpen(fname,FILE_READ|FILE_WRITE|FILE_CSV|FILE_COMMON,',');
+  if(fh==INVALID_HANDLE) return;
+  if(FileSize(fh)==0)
+    FileWrite(fh,"OpenTime","CloseTime","Symbol","Direction","Entry","SL","TP",
+      "Risk_Pct","LotSize","MSS","BOS","LiqSweep","OTE_Pct","Session","Hour",
+      "DayOfWeek","Score","AI_Confidence","Result","Profit_USD","Profit_R",
+      "MFE_Pips","MAE_Pips","MFE_R","MAE_R");
+  FileSeek(fh,0,SEEK_END);
+  string pid=IntegerToString(posID);
+  string openTime=GlobalVariableCheck("ICTSMC_OT_"+pid)?TimeToString((datetime)GlobalVariableGet("ICTSMC_OT_"+pid),TIME_DATE|TIME_MINUTES):"N/A";
+  bool   isBuy   =GlobalVariableCheck("ICTSMC_DIR_"+pid)?GlobalVariableGet("ICTSMC_DIR_"+pid)>0.5:false;
+  double entry   =GlobalVariableCheck("ICTSMC_EN_"+pid)?GlobalVariableGet("ICTSMC_EN_"+pid):0;
+  double sl      =GlobalVariableCheck("ICTSMC_SL_"+pid)?GlobalVariableGet("ICTSMC_SL_"+pid):0;
+  double tp      =GlobalVariableCheck("ICTSMC_TP_"+pid)?GlobalVariableGet("ICTSMC_TP_"+pid):0;
+  double slPts   =GlobalVariableCheck("ICTSMC_SLP_"+pid)?GlobalVariableGet("ICTSMC_SLP_"+pid):0;
+  double lot     =GlobalVariableCheck("ICTSMC_LOT_"+pid)?GlobalVariableGet("ICTSMC_LOT_"+pid):0;
+  double otePct  =GlobalVariableCheck("ICTSMC_OTE_"+pid)?GlobalVariableGet("ICTSMC_OTE_"+pid):0;
+  int    sessInt =GlobalVariableCheck("ICTSMC_SES_"+pid)?(int)GlobalVariableGet("ICTSMC_SES_"+pid):0;
+  int    hr      =GlobalVariableCheck("ICTSMC_HR_"+pid)?(int)GlobalVariableGet("ICTSMC_HR_"+pid):0;
+  int    dowInt  =GlobalVariableCheck("ICTSMC_DOW_"+pid)?(int)GlobalVariableGet("ICTSMC_DOW_"+pid):0;
+  int    sc      =GlobalVariableCheck("ICTSMC_SC_"+pid)?(int)GlobalVariableGet("ICTSMC_SC_"+pid):0;
+  double aiConf  =GlobalVariableCheck("ICTSMC_AIC_"+pid)?GlobalVariableGet("ICTSMC_AIC_"+pid):0;
+  bool   mssSv   =GlobalVariableCheck("ICTSMC_MSS_"+pid)?GlobalVariableGet("ICTSMC_MSS_"+pid)>0.5:false;
+  bool   bosSv   =GlobalVariableCheck("ICTSMC_BOS_"+pid)?GlobalVariableGet("ICTSMC_BOS_"+pid)>0.5:false;
+  bool   lswSv   =GlobalVariableCheck("ICTSMC_LSW_"+pid)?GlobalVariableGet("ICTSMC_LSW_"+pid)>0.5:false;
+  string sNames[6]={"OTHER","LONDON","NEWYORK","OVERLAP","TOKYO","SYDNEY"};
+  string days[7]={"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
+  double tv=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_VALUE);
+  double ts=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE);
+  double riskMoney=(slPts>0&&tv>0&&ts>0&&lot>0)?(slPts*_Point/ts)*tv*lot:0;
+  double profitR=(riskMoney>0.0001)?profit/riskMoney:0;
+  double mfePips=GlobalVariableCheck("ICTSMC_MFE_"+pid)?GlobalVariableGet("ICTSMC_MFE_"+pid):0;
+  double maePips=GlobalVariableCheck("ICTSMC_MAE_"+pid)?GlobalVariableGet("ICTSMC_MAE_"+pid):0;
+  double slPips=slPts/PipFactor;
+  string result=(profit>0.001)?"WIN":((profit<-0.001)?"LOSS":"BE");
+  FileWrite(fh,
+    openTime,TimeToString(TimeCurrent(),TIME_DATE|TIME_MINUTES),_Symbol,isBuy?"BUY":"SELL",
+    DoubleToString(entry,_Digits),DoubleToString(sl,_Digits),DoubleToString(tp,_Digits),
+    DoubleToString(effRiskPct,2),DoubleToString(lot,2),
+    mssSv?"1":"0",bosSv?"1":"0",lswSv?"1":"0",
+    DoubleToString(otePct,1),(sessInt>=0&&sessInt<=5)?sNames[sessInt]:"OTHER",
+    IntegerToString(hr),(dowInt>=0&&dowInt<=6)?days[dowInt]:"?",
+    IntegerToString(sc),DoubleToString(aiConf,3),
+    result,DoubleToString(profit,2),DoubleToString(profitR,2),
+    DoubleToString(mfePips,1),DoubleToString(maePips,1),
+    DoubleToString(slPips>0?mfePips/slPips:0,2),DoubleToString(slPips>0?maePips/slPips:0,2));
+  FileClose(fh);
+  string kpfx[18]={"ICTSMC_DIR_","ICTSMC_OT_","ICTSMC_SL_","ICTSMC_TP_","ICTSMC_EN_",
+    "ICTSMC_SLP_","ICTSMC_LOT_","ICTSMC_OTE_","ICTSMC_SES_","ICTSMC_HR_","ICTSMC_DOW_",
+    "ICTSMC_SC_","ICTSMC_AIC_","ICTSMC_MSS_","ICTSMC_BOS_","ICTSMC_LSW_",
+    "ICTSMC_MFE_","ICTSMC_MAE_"};
+  for(int k=0;k<18;k++){string kv=kpfx[k]+pid;if(GlobalVariableCheck(kv))GlobalVariableDel(kv);} }
+
+
+//===================================================================//
+//  [V1.7] PER-BAR ENTRY REPORT — gated by EnableEntryReport or DebugMode
+//  Shows PASS/FAIL for every filter at the moment of rejection.
+//  Fires at most once per M15 bar to prevent journal spam.
+//===================================================================//
+void PrintEntryReport(bool isBuy)
+{
+   double cur  = SymbolInfoDouble(_Symbol,SYMBOL_BID);
+   double rng  = lastSwingHighH1-lastSwingLowH1;
+   double oLow = (rng>0)?lastSwingLowH1+rng*effOTEMin:0;
+   double oHi  = (rng>0)?lastSwingLowH1+rng*effOTEMax:0;
+   bool   oteP = (rng>0)&&(cur>=oLow)&&(cur<=oHi);
+   int    fvgR = GetEffectiveFVGReq();
+   bool   hDir = mssConfirmed&&cisd1MinConfirmed;
+   string tStr = !UseDailyTrendFilter?"DISABLED":(hDir?(IsTrendAligned(isBuy)?"PASS":"FAIL"):"N/A (direction unknown)");
+   bool   sOK  = effMinScore<=0||lastTradeScore>=effMinScore;
+
+   Print("┌─────────────── ENTRY REPORT ───────────────");
+   Print("│ Time       : ",TimeToString(TimeCurrent(),TIME_DATE|TIME_MINUTES));
+   Print("│ Symbol     : ",_Symbol,"  Style: V1.1");
+   Print("├────────────────────────────────────────────");
+   Print("│ HTF Level  : ",!HTFLevelRequired?"DISABLED":(htfLevelReached?"PASS":"FAIL"));
+   Print("│ MSS (H1)   : ",!UseMSSFilter?"DISABLED":(mssConfirmed?("PASS ["+(mssIsBullish?"BULL":"BEAR")+"]"):"FAIL"));
+   Print("│ BOS (M15)  : ",!UseBOSFilter?"DISABLED":(bosConfirmed?("PASS ["+(bosIsBullish?"BULL":"BEAR")+"]"):"FAIL"));
+   Print("│ Liq Sweep  : ",!RequireLiquiditySweep?"DISABLED":(liquiditySweepDone?"PASS":"FAIL"));
+   Print("│ 1M FVG     : ",fvgR==0?"DISABLED":((fvgCount1Min>=fvgR)?"PASS":("FAIL ("+IntegerToString(fvgCount1Min)+"/"+IntegerToString(fvgR)+")")));
+   Print("│ H1 Swings  : ",(lastSwingHighH1>0&&lastSwingLowH1>0)?"PASS":"FAIL");
+   Print("│ OTE Zone   : ",oteP?"PASS":("FAIL  price="+DoubleToString(cur,_Digits)+" zone="+DoubleToString(oLow,_Digits)+"-"+DoubleToString(oHi,_Digits)));
+   Print("│ 1M Trigger : ",cisd1MinConfirmed?("PASS ["+(cisd1MinIsBearish?"BEAR":"BULL")+"]"):"FAIL");
+   Print("│ MTF Trend  : ",tStr);
+   Print("│ Score      : ",IntegerToString(lastTradeScore),"/",IntegerToString(effMinScore)," ",(sOK?"PASS":"FAIL"));
+   Print("├────────────────────────────────────────────");
+   Print("│ BLOCKED BY : ",lastFailedStepDesc!=""?lastFailedStepDesc:"(context not ready)");
+   Print("└────────────────────────────────────────────");
+}
+
+//===================================================================//
+//  V1.3 FILTER SUMMARY — printed to journal on deinit
+//===================================================================//
+void PrintFilterSummary()
+{
+   Print("╔══════════════════════════════════════════╗");
+   Print("║      ICT SMC EA — SESSION SUMMARY        ║");
+   Print("╠══════════════════════════════════════════╣");
+   Print("║  AI Blocks    : ",cumRejAI);
+   Print("╠══════════════════════════════════════════╣");
+   Print("╠══════════════════════════════════════════╣");
+   Print("║  SETUPS DETECTED (all filters PASS) : ",cumSetupsDetected);
+   Print("║  TOTAL BLOCKED (at least 1 FAIL)    : ",cumRejTotal," bars");
+   Print("║  TRADES TAKEN : ",statTotalTrades,"  (W:",statWins," L:",statLosses,")");
+   if(cumRejTotal>0)
+   { int totalBars=statTotalTrades+cumRejTotal;
+     double setupRate=(double)cumSetupsDetected/MathMax(1,totalBars)*100.0;
+     double hitRate  =(double)statTotalTrades  /MathMax(1,totalBars)*100.0;
+     Print("║  SETUP RATE   : ",DoubleToString(setupRate,1),"% of bars passed all filters");
+     Print("║  TRADE RATE   : ",DoubleToString(hitRate,1),"% of bars resulted in a trade"); }
+   Print("╚══════════════════════════════════════════╝");
+}
+
+//===================================================================//
 //  DEINITIALIZATION                                                   //
 //===================================================================//
 void OnDeinit(const int reason)
@@ -1838,6 +2200,7 @@ void OnTrade()
       double closePrice=HistoryDealGetDouble(ticket,DEAL_PRICE);
       double closeVol  =HistoryDealGetDouble(ticket,DEAL_VOLUME);
       WriteCSVLog("CLOSE",posID,dealBuy,closePrice,0,0,closeVol,profit,lastTradeScore,profit>=0?"WIN":"LOSS");
+      WriteTradeHistoryLog(posID,profit);  // [ML] write full trade record with MFE/MAE
       TakeScreenshot(profit>=0?"WIN_CLOSE":"LOSS_CLOSE");
 
       double curEquity=AccountInfoDouble(ACCOUNT_EQUITY);
@@ -1863,6 +2226,7 @@ void OnTick()
    CheckPartialTP();
    ApplyBreakeven();
    ApplyTrailingStop();
+   UpdateMFEMAE();  // [ML] track max favorable/adverse excursion every tick
 
    if(ForceTrades)
    {
@@ -1885,8 +2249,19 @@ void OnTick()
    { LastBarTime=barTime[0]; cisd1MinConfirmed=false; UpdateContextState(); }
 
    bool isBuy=true;
-   if(CheckTwinsSequence(isBuy)) PlaceTrade(isBuy);
-}
+   static datetime lastReportBar=0;
+   static datetime lastSignalBar=0;
+   datetime repBar=iTime(_Symbol,PERIOD_M15,0);
+   if(CheckTwinsSequence(isBuy))
+   { cumSetupsDetected++;
+     WriteSignalLog(isBuy,true,"",lastTradeScore);
+     PlaceTrade(isBuy); }
+   else if(lastFailedStep>0&&repBar!=lastSignalBar)
+   { lastSignalBar=repBar;
+     WriteSignalLog(isBuy,false,lastFailedStepDesc,lastTradeScore);
+     if((EnableEntryReport||DebugMode)&&repBar!=lastReportBar)
+     { lastReportBar=repBar; PrintEntryReport(isBuy); } } }
+//+------------------------------------------------------------------+
 //+------------------------------------------------------------------+
 
 
