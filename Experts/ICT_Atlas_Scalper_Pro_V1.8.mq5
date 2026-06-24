@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//|                                          ICT SMC EA V1.8          |
+//|                                ICT ATLAS SCALPER PRO V1.8         |
 //|          ICT SMART MONEY CONCEPTS — FULL MODEL V1.8              |
 //|  + ORDER BLOCKS · FVG ZONES/BPR/CE · NAMED ICT KILLZONES          |
 //|                Created By — RATTANA CHHORM                        |
@@ -78,7 +78,7 @@ enum ENUM_TRADING_STYLE
 
 //===================================================================//
 const int    MAGIC_NUMBER = 888777;
-const string EA_NAME      = "ICT SMC EA V1.8";
+const string EA_NAME      = "ICT Atlas Scalper Pro V1.8";
 
 //===================================================================//
 //  INPUTS
@@ -1489,7 +1489,7 @@ void PartialClosePosition(ulong ticket,double closeLots)
   MqlTradeRequest req={};MqlTradeResult res={};
   req.action=TRADE_ACTION_DEAL;req.symbol=_Symbol;req.volume=NormalizeDouble(closeLots,2);
   req.type=(pt==POSITION_TYPE_BUY)?ORDER_TYPE_SELL:ORDER_TYPE_BUY;req.price=curP;req.deviation=30;
-  req.magic=MAGIC_NUMBER;req.position=ticket;req.comment="ICT SMC V1.8 Partial TP";
+  req.magic=MAGIC_NUMBER;req.position=ticket;req.comment="Atlas Scalper Pro Partial TP";
   if(!OrderSend(req,res)) Print("Partial close failed: ",res.retcode); }
 
 void CheckPartialTP()
@@ -1781,7 +1781,7 @@ void PlaceTrade(bool isBuy=true)
   string reason=""; if(!IsBrokerOrderSafe(isBuy,entry,sl,tp,reason)){Print("BROKER: ",reason);cisd1MinConfirmed=false;return;}
   double volume=CalculateLotSize(slPts); if(volume<=0){Print("SKIP: lot=0");return;}
   Print("══ ",EA_NAME," | ",EnumToString(TradingStyle)," | ",(isBuy?"BUY":"SELL")," | Score=",lastTradeScore," | R:R=",DoubleToString(rr,2));
-  bool result=isBuy?trade.Buy(volume,_Symbol,entry,sl,tp,"ICT SMC BUY V1.8"):trade.Sell(volume,_Symbol,entry,sl,tp,"ICT SMC SELL V1.8");
+  bool result=isBuy?trade.Buy(volume,_Symbol,entry,sl,tp,"Atlas Scalper Pro BUY"):trade.Sell(volume,_Symbol,entry,sl,tp,"Atlas Scalper Pro SELL");
   if(result)
   { TodayTradeCount++;
     cisd5MinConfirmed=false;cisd1MinConfirmed=false;mssConfirmed=false;bosConfirmed=false;liquiditySweepDone=false;fvgCount1Min=-1;
@@ -1960,7 +1960,7 @@ void UpdateDisplay()
     PanelLabel("WSl",px,y+row*lh+rowTop,"WinStreak:",PANEL_TXT); PanelLabel("WSv",vx,y+row*lh+rowTop,IntegerToString(consecutiveWins),consecutiveWins>0?PANEL_GREEN:PANEL_TXT); row++;
   }
   // ── ICT SEQUENCE ──
-  PanelLabel("SeqH",px,y+row*lh+rowTop,"ICT SMC V1.8 SEQUENCE:",PANEL_GOLD);
+  PanelLabel("SeqH",px,y+row*lh+rowTop,"ICT SMC SEQUENCE:",PANEL_GOLD);
   {string _b=PANEL_PREFIX+"SecSeqBtn";PanelLabel("SecSeqBtn",bx,y+row*lh+rowTop,secSeqHidden?"[+]":"[-]",PANEL_BLUE,8);ObjectSetInteger(0,_b,OBJPROP_SELECTABLE,true);} row++;
   if(!secSeqHidden){
     string s1v=!HTFLevelRequired?"DISABLED":(htfLevelReached?"PASS":"WAIT"); color s1c=!HTFLevelRequired?PANEL_GOLD:(htfLevelReached?PANEL_GREEN:PANEL_TXT);
@@ -2127,7 +2127,7 @@ int OnInit()
   ArrayResize(obZones,MaxOrderBlocks);   obCount=0;      // [V1.8]
   ArrayResize(fvgZones,MaxFVGZones);     fvgZoneCount=0; // [V1.8]
   Print("════════════════════════════════════════");
-  Print(EA_NAME," — ICT SMART MONEY CONCEPTS V1.8");
+  Print(EA_NAME," — ICT SMART MONEY CONCEPTS");
   Print("Style    : ",EnumToString(TradingStyle));
   Print("OTE      : ",DoubleToString(effOTEMin*100,0),"%-",DoubleToString(effOTEMax*100,0),"%");
   Print("MSS conf : ",effMSSConfirm," bars  BOS conf: ",effBOSConf," bars");
