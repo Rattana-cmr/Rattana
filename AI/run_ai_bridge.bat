@@ -47,29 +47,7 @@ if not exist "%~dp0ai_signal_bridge.py" (
     exit /b
 )
 
-:: ── Remind user to set MT5 path if still default ─────────────
-findstr /C:"YOUR_USERNAME" "%~dp0ai_signal_bridge.py" >nul 2>&1
-if %errorlevel% equ 0 (
-    color 0E
-    echo   [SETUP NEEDED] You must set your MT5 path first.
-    echo.
-    echo   1. Open ai_signal_bridge.py with Notepad
-    echo   2. Find this line near the top:
-    echo      MT5_FILES_PATH = "C:\Users\YOUR_USERNAME\AppData\..."
-    echo   3. Replace YOUR_USERNAME with your Windows username
-    echo      Example: C:\Users\John\AppData\Roaming\MetaQuotes\...
-    echo                                                          \Terminal\Common\Files
-    echo.
-    echo   To find the exact path in MT5:
-    echo     MT5 menu → File → Open Data Folder
-    echo     Then go up one level to: Common\Files
-    echo.
-    echo   After editing, save the file and double-click this
-    echo   launcher again.
-    echo.
-    pause
-    exit /b
-)
+
 
 :: ── All good — launch the bridge ─────────────────────────────
 color 0A
