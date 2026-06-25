@@ -645,13 +645,13 @@ void UpdateKillzoneBoxes()
    datetime barTime=iTime(_Symbol,PERIOD_M15,0);
    if(barTime==lastDraw) return;
    lastDraw=barTime;
-   if(KZAsian)     DrawKillzoneBox("ICTKZ_ASIA",1.0,5.0,C'30,30,55',"Asian KZ");
+   if(KZAsian)     DrawKillzoneBox("ICTKZ_ASIA",1.0,5.0,C'40,90,190',"Asian KZ");
    else            { ObjectDelete(0,"ICTKZ_ASIA"); ObjectDelete(0,"ICTKZ_ASIA_T"); }
-   if(KZLondon)    DrawKillzoneBox("ICTKZ_LDN",7.0,10.0,C'25,45,35',"London KZ");
+   if(KZLondon)    DrawKillzoneBox("ICTKZ_LDN",7.0,10.0,C'40,170,90',"London KZ");
    else            { ObjectDelete(0,"ICTKZ_LDN"); ObjectDelete(0,"ICTKZ_LDN_T"); }
-   if(KZNewYorkAM) DrawKillzoneBox("ICTKZ_NYAM",12.0,15.0,C'45,35,25',"NY AM KZ");
+   if(KZNewYorkAM) DrawKillzoneBox("ICTKZ_NYAM",12.0,15.0,C'210,130,20',"NY AM KZ");
    else            { ObjectDelete(0,"ICTKZ_NYAM"); ObjectDelete(0,"ICTKZ_NYAM_T"); }
-   if(KZNewYorkPM) DrawKillzoneBox("ICTKZ_NYPM",18.5,21.0,C'45,25,40',"NY PM KZ");
+   if(KZNewYorkPM) DrawKillzoneBox("ICTKZ_NYPM",18.5,21.0,C'190,40,180',"NY PM KZ");
    else            { ObjectDelete(0,"ICTKZ_NYPM"); ObjectDelete(0,"ICTKZ_NYPM_T"); }
    ChartRedraw(0);
 }
