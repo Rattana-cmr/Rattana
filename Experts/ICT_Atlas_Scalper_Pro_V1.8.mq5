@@ -155,7 +155,9 @@ input group "========== STRUCTURE MARKERS (V1.8) =========="
 input bool   ShowMSSMarkers       = true;   // Mark MSS / CHoCH shifts (H1) with arrows + labels
 input bool   ShowBOSMarkers       = true;   // Mark BOS shifts (M15) with arrows + labels
 input bool   ShowLiquidityMarkers = true;   // Mark liquidity sweeps with arrows + labels
+input bool   ShowSMTMarkers       = true;   // Mark SMT (correlated-pair) divergence with arrows + labels
 input int    MaxStructureMarkers  = 20;     // Max markers kept on chart per type (rotating buffer)
+input bool   ShowKillzoneBoxes    = true;   // Shade the named ICT killzone time windows on the chart
 
 input group "========== AI SIGNAL FILTER =========="
 input bool   UseAIFilter          = false;   // Enable AI signal reading from Python bridge
@@ -272,6 +274,8 @@ bool     bosConfirmed       = false;
 bool     bosIsBullish       = false;
 bool     liquiditySweepDone = false;
 bool     sweepIsBullish     = false;
+bool     smtConfirmed       = false;
+bool     smtIsBullish       = false;
 int      fvgCount1Min       = -1;
 datetime LastFVGBarTime     = 0;
 
@@ -424,10 +428,11 @@ int    dragOffsetY   = 0;
 string SwingLineNames[];
 int    SwingLineIndex = 0;
 int    MaxSwingLines  = 10;
-string OTEObjectNames[4];
+string OTEObjectNames[5];
 string MSSMarkerNames[]; int MSSMarkerIdx=0;   // [V1.8] structure markers
 string BOSMarkerNames[]; int BOSMarkerIdx=0;   // [V1.8]
 string LiqMarkerNames[]; int LiqMarkerIdx=0;   // [V1.8]
+string SMTMarkerNames[]; int SMTMarkerIdx=0;   // [V1.8]
 
 //===================================================================//
 //  PRESET / OPT MODE
@@ -592,6 +597,65 @@ string ActiveKillzoneName()
    return "NONE";
 }
 
+//===================================================================//
+//  [V1.8] KILLZONE BOXES — shade each enabled named killzone's GMT   //
+//  time window on the chart for "today" (broker time), TradingView- //
+//  style session backgrounds. Redrawn once per new M15 bar.         //
+//===================================================================//
+datetime GetTodayGMTTime(double gmtHour)
+{
+   int offset=GetEffectiveGMTOffset();
+   MqlDateTime dt; TimeToStruct(TimeCurrent(),dt);
+   dt.hour=0; dt.min=0; dt.sec=0;
+   datetime brokerMidnight=StructToTime(dt);
+   return brokerMidnight+(datetime)MathRound((gmtHour+offset)*3600.0);
+}
+
+void DrawKillzoneBox(string name,double gmtStart,double gmtEnd,color c,string label)
+{
+   datetime t1=GetTodayGMTTime(gmtStart), t2=GetTodayGMTTime(gmtEnd);
+   if(t2<=t1) return;
+   int hBar=iHighest(_Symbol,PERIOD_M15,MODE_HIGH,96,0), lBar=iLowest(_Symbol,PERIOD_M15,MODE_LOW,96,0);
+   if(hBar<0||lBar<0) return;
+   double hi=iHigh(_Symbol,PERIOD_M15,hBar), lo=iLow(_Symbol,PERIOD_M15,lBar);
+   if(hi<=lo) return;
+   double pad=(hi-lo)*0.15;
+   if(ObjectFind(0,name)>=0) ObjectDelete(0,name);
+   ObjectCreate(0,name,OBJ_RECTANGLE,0,t1,hi+pad,t2,lo-pad);
+   ObjectSetInteger(0,name,OBJPROP_COLOR,c);
+   ObjectSetInteger(0,name,OBJPROP_FILL,true);
+   ObjectSetInteger(0,name,OBJPROP_BACK,true);
+   ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
+   ObjectSetInteger(0,name,OBJPROP_WIDTH,1);
+   string tname=name+"_T";
+   if(ObjectFind(0,tname)>=0) ObjectDelete(0,tname);
+   ObjectCreate(0,tname,OBJ_TEXT,0,t1,hi+pad);
+   ObjectSetString(0,tname,OBJPROP_TEXT,label);
+   ObjectSetInteger(0,tname,OBJPROP_COLOR,c);
+   ObjectSetInteger(0,tname,OBJPROP_FONTSIZE,7);
+   ObjectSetString(0,tname,OBJPROP_FONT,"Consolas");
+   ObjectSetInteger(0,tname,OBJPROP_ANCHOR,ANCHOR_LEFT_LOWER);
+   ObjectSetInteger(0,tname,OBJPROP_SELECTABLE,false);
+}
+
+void UpdateKillzoneBoxes()
+{
+   if(!ShowKillzoneBoxes) return;
+   static datetime lastDraw=0;
+   datetime barTime=iTime(_Symbol,PERIOD_M15,0);
+   if(barTime==lastDraw) return;
+   lastDraw=barTime;
+   if(KZAsian)     DrawKillzoneBox("ICTKZ_ASIA",1.0,5.0,C'30,30,55',"Asian KZ");
+   else            { ObjectDelete(0,"ICTKZ_ASIA"); ObjectDelete(0,"ICTKZ_ASIA_T"); }
+   if(KZLondon)    DrawKillzoneBox("ICTKZ_LDN",7.0,10.0,C'25,45,35',"London KZ");
+   else            { ObjectDelete(0,"ICTKZ_LDN"); ObjectDelete(0,"ICTKZ_LDN_T"); }
+   if(KZNewYorkAM) DrawKillzoneBox("ICTKZ_NYAM",12.0,15.0,C'45,35,25',"NY AM KZ");
+   else            { ObjectDelete(0,"ICTKZ_NYAM"); ObjectDelete(0,"ICTKZ_NYAM_T"); }
+   if(KZNewYorkPM) DrawKillzoneBox("ICTKZ_NYPM",18.5,21.0,C'45,25,40',"NY PM KZ");
+   else            { ObjectDelete(0,"ICTKZ_NYPM"); ObjectDelete(0,"ICTKZ_NYPM_T"); }
+   ChartRedraw(0);
+}
+
 bool SessionActiveNow(string which)
 { double h=GetGMTHour();
   if(which=="London")  return(h>=8.0&&h<17.0); if(which=="NewYork") return(h>=13.0&&h<22.0);
@@ -645,7 +709,7 @@ bool HasReachedHTFLevel()
 //  Uses effMSSConfirm (2 for SmartActive vs 3 for Conservative)
 //  Checks current forming bar + displacement candles
 //===================================================================//
-bool DetectMSS(bool &isBullish)
+bool DetectMSS(bool &isBullish,datetime &pivotTime,double &pivotPrice)
 {
    int conf=effMSSConfirm;
    int need=MSSLookbackBars+conf*2+5;
@@ -675,15 +739,15 @@ bool DetectMSS(bool &isBullish)
       bool   bull=h1[i].close>h1[i].open;
       // Displacement candle: body > 40% ATR, closes beyond swing level
       if(bull && body>atr*0.4 && h1[i].close>swHigh && swLBar<swHBar)
-      { isBullish=true; return true; }
+      { isBullish=true; pivotTime=h1[swHBar].time; pivotPrice=swHigh; return true; }
       if(!bull && body>atr*0.4 && h1[i].close<swLow && swHBar<swLBar)
-      { isBullish=false; return true; }
+      { isBullish=false; pivotTime=h1[swLBar].time; pivotPrice=swLow; return true; }
    }
    // Standard structural close beyond swing
    double checkH=MathMax(h1[0].close,h1[1].close);
    double checkL=MathMin(h1[0].close,h1[1].close);
-   if(swLBar<swHBar && checkH>swHigh){ isBullish=true;  return true; }
-   if(swHBar<swLBar && checkL<swLow) { isBullish=false; return true; }
+   if(swLBar<swHBar && checkH>swHigh){ isBullish=true;  pivotTime=h1[swHBar].time; pivotPrice=swHigh; return true; }
+   if(swHBar<swLBar && checkL<swLow) { isBullish=false; pivotTime=h1[swLBar].time; pivotPrice=swLow;  return true; }
    return false;
 }
 
@@ -691,7 +755,7 @@ bool DetectMSS(bool &isBullish)
 //  V1.3 IMPROVED BOS DETECTION
 //  Uses effBOSConf; checks current bar + displacement
 //===================================================================//
-bool DetectBOS(bool &isBullish)
+bool DetectBOS(bool &isBullish,datetime &pivotTime,double &pivotPrice)
 {
    int conf=effBOSConf;
    int need=BOSLookbackBars+conf*2+5;
@@ -716,13 +780,13 @@ bool DetectBOS(bool &isBullish)
    double atr=GetATR();
    for(int i=0;i<=1;i++)
    { double body=MathAbs(m15[i].close-m15[i].open); bool bull=m15[i].close>m15[i].open;
-     if(bull&&body>atr*0.3&&swHigh>0&&m15[i].close>swHigh){ isBullish=true;  return true; }
-     if(!bull&&body>atr*0.3&&swLow>0 &&m15[i].close<swLow) { isBullish=false; return true; } }
+     if(bull&&body>atr*0.3&&swHigh>0&&m15[i].close>swHigh){ isBullish=true;  pivotTime=m15[swHBar].time; pivotPrice=swHigh; return true; }
+     if(!bull&&body>atr*0.3&&swLow>0 &&m15[i].close<swLow) { isBullish=false; pivotTime=m15[swLBar].time; pivotPrice=swLow;  return true; } }
 
    double chkH=MathMax(m15[0].close,m15[1].close);
    double chkL=MathMin(m15[0].close,m15[1].close);
-   if(swHigh>0&&chkH>swHigh){ isBullish=true;  return true; }
-   if(swLow >0&&chkL<swLow) { isBullish=false; return true; }
+   if(swHigh>0&&chkH>swHigh){ isBullish=true;  pivotTime=m15[swHBar].time; pivotPrice=swHigh; return true; }
+   if(swLow >0&&chkL<swLow) { isBullish=false; pivotTime=m15[swLBar].time; pivotPrice=swLow;  return true; }
    return false;
 }
 
@@ -915,7 +979,8 @@ void DrawOrderBlock(int idx)
    string tname=name+"_T";  // [V1.8] OB text label
    if(ObjectFind(0,tname)>=0) ObjectDelete(0,tname);
    ObjectCreate(0,tname,OBJ_TEXT,0,obZones[idx].time,obZones[idx].top);
-   ObjectSetString(0,tname,OBJPROP_TEXT,obZones[idx].mitigated?"OB(used)":(obZones[idx].bullish?"OB+":"OB-"));
+   ObjectSetString(0,tname,OBJPROP_TEXT,obZones[idx].bullish?(obZones[idx].mitigated?"Bull OB (used)":"Bull OB"):
+                                                                (obZones[idx].mitigated?"Bear OB (used)":"Bear OB"));
    ObjectSetInteger(0,tname,OBJPROP_COLOR,c);
    ObjectSetInteger(0,tname,OBJPROP_FONTSIZE,7);
    ObjectSetString(0,tname,OBJPROP_FONT,"Consolas");
@@ -980,7 +1045,12 @@ void UpdateOrderBlockMitigation()
    {
       if(obZones[i].mitigated) continue;
       if(bid<=obZones[i].top && ask>=obZones[i].bottom)
-      { obZones[i].mitigated=true; if(ShowOrderBlocks) DrawOrderBlock(i); }
+      { obZones[i].mitigated=true; if(ShowOrderBlocks) DrawOrderBlock(i); continue; }
+      // [V1.8] keep extending the right edge to "now" until mitigated, TradingView-style
+      if(ShowOrderBlocks)
+      { string name="ICTOB_"+IntegerToString(i);
+        if(ObjectFind(0,name)>=0)
+           ObjectSetInteger(0,name,OBJPROP_TIME,1,TimeCurrent()+(datetime)(PeriodSeconds(PERIOD_M15)*2)); }
    }
 }
 
@@ -1164,6 +1234,23 @@ bool CheckSMTDivergence(bool isBuy)
    return(mainRecent>mainPrior)&&(corrRecent<corrPrior); // HH vs LH
 }
 
+// [V1.8] Visualization-only variant: no UseSMTFilter bypass, returns false (not true)
+// when data is insufficient, so it never draws a false "confirmed" marker.
+bool DetectSMTForViz(bool isBuy)
+{
+   if(StringLen(SMTSymbol)<3) return false;
+   double mainRecent,mainPrior,corrRecent,corrPrior;
+   if(isBuy)
+   {
+      if(!GetLastTwoSwingExtremes(_Symbol,true,mainRecent,mainPrior))   return false;
+      if(!GetLastTwoSwingExtremes(SMTSymbol,true,corrRecent,corrPrior)) return false;
+      return(mainRecent<mainPrior)&&(corrRecent>corrPrior); // LL vs HL
+   }
+   if(!GetLastTwoSwingExtremes(_Symbol,false,mainRecent,mainPrior))    return false;
+   if(!GetLastTwoSwingExtremes(SMTSymbol,false,corrRecent,corrPrior))  return false;
+   return(mainRecent>mainPrior)&&(corrRecent<corrPrior); // HH vs LH
+}
+
 bool IsNewsTime()
 { if(!UseNewsFilter) return false;
   if(TimeCurrent()-lastNewsCheck<60) return newsBlocked; lastNewsCheck=TimeCurrent();
@@ -1246,13 +1333,13 @@ void UpdateContextState()
    else{ if(htfLevelReached) htfLevelReached=false; RejHTFLevel(); lastFailedStep=1;lastFailedStepDesc="HTF Level";return; }
 
    if(effUseMSSFilter)
-   { bool mssB=false;
-     if(DetectMSS(mssB))
+   { bool mssB=false; datetime mssPivotT=0; double mssPivotP=0;
+     if(DetectMSS(mssB,mssPivotT,mssPivotP))
      { if(!mssConfirmed||mssIsBullish!=mssB)
        {mssConfirmed=true;mssIsBullish=mssB;cisd5MinConfirmed=true;cisd5MinIsBearish=!mssB;
         cisd1MinConfirmed=false;fvgCount1Min=-1;Print("STEP 2 PASS: MSS "+(mssB?"BULL":"BEAR"));
         if(ShowMSSMarkers) DrawStructureMarker(MSSMarkerNames,MSSMarkerIdx,MaxStructureMarkers,"ICTMSS","MSS/CHoCH",
-                              TimeCurrent(),SymbolInfoDouble(_Symbol,SYMBOL_BID),mssB,clrLime);} }
+                              TimeCurrent(),SymbolInfoDouble(_Symbol,SYMBOL_BID),mssB,clrLime,mssPivotT,mssPivotP);} }
      else{ if(mssConfirmed){mssConfirmed=false;DebugPrint("STEP 2: MSS lost");}
            RejMSS(); lastFailedStep=2;lastFailedStepDesc="MSS (H1)";return; } }
    else
@@ -1268,12 +1355,21 @@ void UpdateContextState()
                                TimeCurrent(),SymbolInfoDouble(_Symbol,SYMBOL_BID),!tb,clrLime);}}
      if(!mssConfirmed){RejMSS();lastFailedStep=2;lastFailedStepDesc="5M Direction";return;} }
 
+   if(ShowSMTMarkers)  // [V1.8] purely visual telemetry, independent of UseSMTFilter
+   { bool smtB=DetectSMTForViz(true), smtS=DetectSMTForViz(false);
+     bool smtNow=smtB||smtS, smtDir=smtB;
+     if(smtNow){ if(!smtConfirmed||smtIsBullish!=smtDir)
+       { smtConfirmed=true; smtIsBullish=smtDir;
+         DrawStructureMarker(SMTMarkerNames,SMTMarkerIdx,MaxStructureMarkers,"ICTSMT","SMT",
+                              TimeCurrent(),SymbolInfoDouble(_Symbol,SYMBOL_BID),smtDir,clrFuchsia); } }
+     else smtConfirmed=false; }
+
    if(effUseBOSFilter)
-   { bool bosB=false;
-     if(DetectBOS(bosB))
+   { bool bosB=false; datetime bosPivotT=0; double bosPivotP=0;
+     if(DetectBOS(bosB,bosPivotT,bosPivotP))
      { if(!bosConfirmed||bosIsBullish!=bosB){bosConfirmed=true;bosIsBullish=bosB;Print("STEP 3 PASS: BOS "+(bosB?"BULL":"BEAR"));
          if(ShowBOSMarkers) DrawStructureMarker(BOSMarkerNames,BOSMarkerIdx,MaxStructureMarkers,"ICTBOS","BOS",
-                               TimeCurrent(),SymbolInfoDouble(_Symbol,SYMBOL_BID),bosB,clrDeepSkyBlue);} }
+                               TimeCurrent(),SymbolInfoDouble(_Symbol,SYMBOL_BID),bosB,clrDeepSkyBlue,bosPivotT,bosPivotP);} }
      else{ if(bosConfirmed){bosConfirmed=false;DebugPrint("STEP 3: BOS lost");}
            RejBOS(); lastFailedStep=3;lastFailedStepDesc="BOS (M15)";return; } }
    else bosConfirmed=true;
@@ -1898,7 +1994,7 @@ void DrawOTEZone(double hi,double lo)
 { if(hi<=0||lo<=0||hi<=lo) return;
   if(MathAbs(hi-lastOTEHigh)<_Point*2&&MathAbs(lo-lastOTELow)<_Point*2) return;
   lastOTEHigh=hi;lastOTELow=lo;
-  for(int i=0;i<4;i++){if(OTEObjectNames[i]!="")ObjectDelete(0,OTEObjectNames[i]);}
+  for(int i=0;i<5;i++){if(OTEObjectNames[i]!="")ObjectDelete(0,OTEObjectNames[i]);}
   double range=hi-lo,oteLow=lo+range*effOTEMin,oteHigh=lo+range*effOTEMax;
   double oteRange=oteHigh-oteLow,buyTop=oteLow+oteRange*0.35,sellBtm=oteHigh-oteRange*0.35;
   datetime t0=iTime(_Symbol,PERIOD_H1,20),t1=iTime(_Symbol,PERIOD_H1,0)+(datetime)(PeriodSeconds(PERIOD_H1)*10);
@@ -1908,6 +2004,15 @@ void DrawOTEZone(double hi,double lo)
   for(int i=0;i<4;i++){OTEObjectNames[i]=names[i];ObjectCreate(0,names[i],OBJ_RECTANGLE,0,t0,prices[i][0],t1,prices[i][1]);
     ObjectSetInteger(0,names[i],OBJPROP_COLOR,colors[i]);ObjectSetInteger(0,names[i],OBJPROP_BACK,true);
     ObjectSetInteger(0,names[i],OBJPROP_FILL,true);ObjectSetInteger(0,names[i],OBJPROP_SELECTABLE,false);}
+  string lname="OTEZO_LBL"; OTEObjectNames[4]=lname;
+  if(ObjectFind(0,lname)>=0) ObjectDelete(0,lname);
+  ObjectCreate(0,lname,OBJ_TEXT,0,t1,oteHigh);
+  ObjectSetString(0,lname,OBJPROP_TEXT,"OTE "+DoubleToString(effOTEMin*100,0)+"-"+DoubleToString(effOTEMax*100,0)+"%");
+  ObjectSetInteger(0,lname,OBJPROP_COLOR,clrKhaki);
+  ObjectSetInteger(0,lname,OBJPROP_FONTSIZE,8);
+  ObjectSetString(0,lname,OBJPROP_FONT,"Consolas");
+  ObjectSetInteger(0,lname,OBJPROP_ANCHOR,ANCHOR_RIGHT_LOWER);
+  ObjectSetInteger(0,lname,OBJPROP_SELECTABLE,false);
   ChartRedraw(0); }
 
 void DrawSwingLine(double price,bool isBuy,string source)
@@ -1928,12 +2033,13 @@ void DrawSwingLine(double price,bool isBuy,string source)
 //  is drawn so the chart doesn't accumulate objects forever.          //
 //===================================================================//
 void DrawStructureMarker(string &names[],int &idx,int maxN,string prefix,string tag,
-                          datetime t,double price,bool bullish,color c)
+                          datetime t,double price,bool bullish,color c,
+                          datetime pivotTime=0,double pivotPrice=0)
 {
    if(maxN<=0) return;
    double off=MathMax(GetATR()*0.6,_Point*10);
    double y=bullish?price-off:price+off;
-   if(names[idx]!=""){ ObjectDelete(0,names[idx]); ObjectDelete(0,names[idx]+"_T"); }
+   if(names[idx]!=""){ ObjectDelete(0,names[idx]); ObjectDelete(0,names[idx]+"_T"); ObjectDelete(0,names[idx]+"_LN"); }
    string name=prefix+"_"+IntegerToString(idx);
    names[idx]=name; idx=(idx+1)%maxN;
    if(ObjectFind(0,name)>=0) ObjectDelete(0,name);
@@ -1952,6 +2058,19 @@ void DrawStructureMarker(string &names[],int &idx,int maxN,string prefix,string 
    ObjectSetString(0,tname,OBJPROP_FONT,"Consolas");
    ObjectSetInteger(0,tname,OBJPROP_ANCHOR,bullish?ANCHOR_LOWER:ANCHOR_UPPER);
    ObjectSetInteger(0,tname,OBJPROP_SELECTABLE,false);
+   if(pivotTime>0 && pivotPrice>0)
+   {
+      string lname=name+"_LN";
+      if(ObjectFind(0,lname)>=0) ObjectDelete(0,lname);
+      ObjectCreate(0,lname,OBJ_TREND,0,pivotTime,pivotPrice,t,price);
+      ObjectSetInteger(0,lname,OBJPROP_COLOR,c);
+      ObjectSetInteger(0,lname,OBJPROP_STYLE,STYLE_DOT);
+      ObjectSetInteger(0,lname,OBJPROP_WIDTH,1);
+      ObjectSetInteger(0,lname,OBJPROP_RAY_RIGHT,false);
+      ObjectSetInteger(0,lname,OBJPROP_RAY_LEFT,false);
+      ObjectSetInteger(0,lname,OBJPROP_BACK,true);
+      ObjectSetInteger(0,lname,OBJPROP_SELECTABLE,false);
+   }
    ChartRedraw(0);
 }
 
@@ -2203,10 +2322,11 @@ int OnInit()
   trade.SetExpertMagicNumber(MAGIC_NUMBER); trade.SetDeviationInPoints(30); trade.SetTypeFillingBySymbol(_Symbol);
   if(_Digits==5||_Digits==3) PipFactor=10.0; else if(_Digits==2) PipFactor=100.0; else PipFactor=1.0;
   ArrayResize(SwingLineNames,MaxSwingLines); for(int i=0;i<MaxSwingLines;i++) SwingLineNames[i]="";
-  for(int i=0;i<4;i++) OTEObjectNames[i]="";
+  for(int i=0;i<5;i++) OTEObjectNames[i]="";
   ArrayResize(MSSMarkerNames,MaxStructureMarkers); for(int i=0;i<MaxStructureMarkers;i++) MSSMarkerNames[i]=""; // [V1.8]
   ArrayResize(BOSMarkerNames,MaxStructureMarkers); for(int i=0;i<MaxStructureMarkers;i++) BOSMarkerNames[i]=""; // [V1.8]
   ArrayResize(LiqMarkerNames,MaxStructureMarkers); for(int i=0;i<MaxStructureMarkers;i++) LiqMarkerNames[i]=""; // [V1.8]
+  ArrayResize(SMTMarkerNames,MaxStructureMarkers); for(int i=0;i<MaxStructureMarkers;i++) SMTMarkerNames[i]=""; // [V1.8]
   ArrayResize(obZones,MaxOrderBlocks);   obCount=0;      // [V1.8]
   ArrayResize(fvgZones,MaxFVGZones);     fvgZoneCount=0; // [V1.8]
   Print("════════════════════════════════════════");
@@ -2242,7 +2362,7 @@ void OnDeinit(const int reason)
   if(SlowEMAHandle!=INVALID_HANDLE) IndicatorRelease(SlowEMAHandle);
   if(H4EMAHandle  !=INVALID_HANDLE) IndicatorRelease(H4EMAHandle);  // [V1.6]
   for(int i=0;i<MaxSwingLines;i++) if(SwingLineNames[i]!="") ObjectDelete(0,SwingLineNames[i]);
-  for(int i=0;i<4;i++) if(OTEObjectNames[i]!="") ObjectDelete(0,OTEObjectNames[i]);
+  for(int i=0;i<5;i++) if(OTEObjectNames[i]!="") ObjectDelete(0,OTEObjectNames[i]);
   string pfx=EA_NAME+"_"+_Symbol+"_";
   GlobalVariableSet(pfx+"Trades",statTotalTrades);GlobalVariableSet(pfx+"Wins",statWins);
   GlobalVariableSet(pfx+"Losses",statLosses);GlobalVariableSet(pfx+"Profit",statTotalProfit);
@@ -2251,6 +2371,7 @@ void OnDeinit(const int reason)
   PanelDeleteAll(); ObjectsDeleteAll(0,"Twins_"); ObjectsDeleteAll(0,"OTEZO_");
   ObjectsDeleteAll(0,"ICTOB_"); ObjectsDeleteAll(0,"ICTFVG_");  // [V1.8]
   ObjectsDeleteAll(0,"ICTMSS_"); ObjectsDeleteAll(0,"ICTBOS_"); ObjectsDeleteAll(0,"ICTSWP_"); // [V1.8]
+  ObjectsDeleteAll(0,"ICTSMT_"); ObjectsDeleteAll(0,"ICTKZ_");  // [V1.8]
   Comment(""); }
 
 void OnTrade()
@@ -2283,7 +2404,7 @@ void OnTrade()
 void OnTick()
 { UpdateDisplay(); CheckFridayClose(); CheckPartialTP(); ApplyBreakeven(); ApplyTrailingStop();
   UpdateMFEMAE();  // [ML] track max favorable/adverse excursion every tick
-  DetectFVGZones(); UpdateOrderBlockMitigation(); UpdateFVGMitigation();  // [V1.8]
+  DetectFVGZones(); UpdateOrderBlockMitigation(); UpdateFVGMitigation(); UpdateKillzoneBoxes();  // [V1.8]
   if(ForceTrades){static datetime lf=0;if(TimeCurrent()-lf>=60&&CanTrade()){lf=TimeCurrent();PlaceTrade();}return;}
   if(!CanTrade()) return; if(!IsTradingTime()) return;
   datetime barTime[1]; if(CopyTime(_Symbol,PERIOD_M15,0,1,barTime)!=1) return;
