@@ -30,6 +30,7 @@ KZLondon=true
 KZNewYorkAM=true
 KZNewYorkPM=false
 ShowOrderBlocks=true
+ShowBreakerBlocks=true
 UseOrderBlockFilter=false
 OBLookbackBars=60
 OBDisplacementATRMulti=0.5

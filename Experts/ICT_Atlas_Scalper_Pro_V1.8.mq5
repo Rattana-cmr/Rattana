@@ -139,6 +139,7 @@ input bool   KZNewYorkPM           = false;  // NY PM KZ   ~13:30-16:00 NY time 
 
 input group "========== ORDER BLOCKS (V1.8) =========="
 input bool   ShowOrderBlocks       = true;   // Draw order block zones on chart
+input bool   ShowBreakerBlocks     = true;   // Relabel a mitigated OB as Bull/Bear Breaker once price closes through it
 input bool   UseOrderBlockFilter   = false;  // Require entry price inside an unmitigated OB (hard gate)
 input int    OBLookbackBars        = 60;     // M15 bars scanned for displacement + swing break
 input double OBDisplacementATRMulti= 0.5;    // Displacement candle body >= this * ATR
@@ -381,7 +382,7 @@ int    cumRejAI       = 0;  // [V1.6]
 int    cumSetupsDetected = 0; // [V1.7] times CheckTwinsSequence returned true (all filters passed)
 
 // [V1.8] Order Block zones
-struct OBZone { double top; double bottom; datetime time; bool bullish; bool mitigated; };
+struct OBZone { double top; double bottom; datetime time; bool bullish; bool mitigated; bool breaker; };
 OBZone   obZones[];
 int      obCount       = 0;
 datetime lastOBScanBar = 0;
@@ -970,17 +971,24 @@ void DrawOrderBlock(int idx)
    datetime t1=obZones[idx].time+(datetime)(PeriodSeconds(PERIOD_M15)*40);
    if(ObjectFind(0,name)>=0) ObjectDelete(0,name);
    ObjectCreate(0,name,OBJ_RECTANGLE,0,obZones[idx].time,obZones[idx].top,t1,obZones[idx].bottom);
-   color c=obZones[idx].mitigated?(obZones[idx].bullish?C'30,60,40':C'60,30,30'):(obZones[idx].bullish?clrLimeGreen:clrOrangeRed);
+   bool isBreaker=(ShowBreakerBlocks && obZones[idx].breaker);
+   bool breakerBullish=!obZones[idx].bullish; // polarity flips once an OB becomes a breaker
+   color c;
+   if(isBreaker) c=breakerBullish?clrAqua:clrHotPink;
+   else c=obZones[idx].mitigated?(obZones[idx].bullish?C'30,60,40':C'60,30,30'):(obZones[idx].bullish?clrLimeGreen:clrOrangeRed);
    ObjectSetInteger(0,name,OBJPROP_COLOR,c);
-   ObjectSetInteger(0,name,OBJPROP_FILL,!obZones[idx].mitigated);
+   ObjectSetInteger(0,name,OBJPROP_FILL,isBreaker || !obZones[idx].mitigated);
    ObjectSetInteger(0,name,OBJPROP_BACK,true);
    ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
-   ObjectSetInteger(0,name,OBJPROP_STYLE,obZones[idx].mitigated?STYLE_DOT:STYLE_SOLID);
+   ObjectSetInteger(0,name,OBJPROP_STYLE,(obZones[idx].mitigated && !isBreaker)?STYLE_DOT:STYLE_SOLID);
    string tname=name+"_T";  // [V1.8] OB text label
    if(ObjectFind(0,tname)>=0) ObjectDelete(0,tname);
    ObjectCreate(0,tname,OBJ_TEXT,0,obZones[idx].time,obZones[idx].top);
-   ObjectSetString(0,tname,OBJPROP_TEXT,obZones[idx].bullish?(obZones[idx].mitigated?"Bull OB (used)":"Bull OB"):
-                                                                (obZones[idx].mitigated?"Bear OB (used)":"Bear OB"));
+   if(isBreaker)
+      ObjectSetString(0,tname,OBJPROP_TEXT,breakerBullish?"Bull Breaker":"Bear Breaker");
+   else
+      ObjectSetString(0,tname,OBJPROP_TEXT,obZones[idx].bullish?(obZones[idx].mitigated?"Bull OB (used)":"Bull OB"):
+                                                                   (obZones[idx].mitigated?"Bear OB (used)":"Bear OB"));
    ObjectSetInteger(0,tname,OBJPROP_COLOR,c);
    ObjectSetInteger(0,tname,OBJPROP_FONTSIZE,7);
    ObjectSetString(0,tname,OBJPROP_FONT,"Consolas");
@@ -996,7 +1004,7 @@ void AddOrderBlock(double top,double bottom,datetime t,bool bullish)
    int n=(int)MathMin(obCount+1,MaxOrderBlocks);
    for(int i=n-1;i>0;i--) obZones[i]=obZones[i-1];
    obZones[0].top=top; obZones[0].bottom=bottom; obZones[0].time=t;
-   obZones[0].bullish=bullish; obZones[0].mitigated=false;
+   obZones[0].bullish=bullish; obZones[0].mitigated=false; obZones[0].breaker=false;
    obCount=n;
    if(ShowOrderBlocks) RedrawAllOrderBlocks();
 }
@@ -1012,6 +1020,15 @@ void DetectOrderBlocks()
    if(CopyRates(_Symbol,PERIOD_M15,0,need,m)<need) return;
    if(lastOBScanBar==m[1].time) return;
    lastOBScanBar=m[1].time;
+
+   // [V1.8] Breaker Block: a mitigated OB whose opposite boundary then gets
+   // closed through flips polarity (former support becomes resistance, or vice versa).
+   for(int i=0;i<obCount;i++)
+   {
+      if(!obZones[i].mitigated || obZones[i].breaker) continue;
+      bool flipped=obZones[i].bullish? (m[1].close<obZones[i].bottom) : (m[1].close>obZones[i].top);
+      if(flipped){ obZones[i].breaker=true; if(ShowBreakerBlocks) DrawOrderBlock(i); }
+   }
 
    double atr=GetATR();
    double body=MathAbs(m[1].close-m[1].open);
