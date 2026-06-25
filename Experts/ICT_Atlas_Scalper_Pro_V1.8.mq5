@@ -54,6 +54,15 @@
 //      Price Range) flagged when a bullish and bearish FVG overlap.
 // [49] NEW: Named ICT Killzones — Asian/London/NY AM/NY PM windows
 //      (UseKillzoneFilter) replace the generic session-only filter.
+// V1.8.1 UPGRADE — On-Chart Structure Markers + Default Style
+// [50] CHANGE: Default TradingStyle = STYLE_SMART_ACTIVE_PLUS (was
+//      STYLE_SMART_ACTIVE) — trades across all active sessions
+//      instead of only the 08:30-15:00 GMT window.
+// [51] NEW: Live arrow + text markers for MSS/CHoCH (H1), BOS (M15),
+//      and Liquidity Sweeps, drawn on confirmation so the sequence
+//      is visible on the chart, not just in the panel.
+// [52] NEW: "OB"/"FVG"/"BPR" text labels on existing order block and
+//      FVG zone rectangles so each zone type reads at a glance.
 //+------------------------------------------------------------------+
 #property copyright "RATTANA CHHORM"
 #property version   "1.8"
@@ -84,7 +93,7 @@ const string EA_NAME      = "ICT Atlas Scalper Pro V1.8";
 //  INPUTS
 //===================================================================//
 input group "========== TRADING STYLE =========="
-input ENUM_TRADING_STYLE TradingStyle = STYLE_SMART_ACTIVE;
+input ENUM_TRADING_STYLE TradingStyle = STYLE_SMART_ACTIVE_PLUS;
 
 input group "========== RISK MANAGEMENT =========="
 input ENUM_RISK_MODE RiskMode      = RISK_FIXED_PCT;
@@ -141,6 +150,12 @@ input bool   UseFVGZoneFilter      = false;  // Require entry price inside an un
 input int    FVGZoneLookbackBars   = 150;    // M1 bars scanned for 3-candle gaps
 input int    MaxFVGZones           = 20;     // Max FVG zones tracked at once
 input bool   ShowBPRZones          = true;   // Highlight Balanced Price Range (overlapping FVGs) in gold
+
+input group "========== STRUCTURE MARKERS (V1.8) =========="
+input bool   ShowMSSMarkers       = true;   // Mark MSS / CHoCH shifts (H1) with arrows + labels
+input bool   ShowBOSMarkers       = true;   // Mark BOS shifts (M15) with arrows + labels
+input bool   ShowLiquidityMarkers = true;   // Mark liquidity sweeps with arrows + labels
+input int    MaxStructureMarkers  = 20;     // Max markers kept on chart per type (rotating buffer)
 
 input group "========== AI SIGNAL FILTER =========="
 input bool   UseAIFilter          = false;   // Enable AI signal reading from Python bridge
@@ -410,6 +425,9 @@ string SwingLineNames[];
 int    SwingLineIndex = 0;
 int    MaxSwingLines  = 10;
 string OTEObjectNames[4];
+string MSSMarkerNames[]; int MSSMarkerIdx=0;   // [V1.8] structure markers
+string BOSMarkerNames[]; int BOSMarkerIdx=0;   // [V1.8]
+string LiqMarkerNames[]; int LiqMarkerIdx=0;   // [V1.8]
 
 //===================================================================//
 //  PRESET / OPT MODE
@@ -894,6 +912,15 @@ void DrawOrderBlock(int idx)
    ObjectSetInteger(0,name,OBJPROP_BACK,true);
    ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
    ObjectSetInteger(0,name,OBJPROP_STYLE,obZones[idx].mitigated?STYLE_DOT:STYLE_SOLID);
+   string tname=name+"_T";  // [V1.8] OB text label
+   if(ObjectFind(0,tname)>=0) ObjectDelete(0,tname);
+   ObjectCreate(0,tname,OBJ_TEXT,0,obZones[idx].time,obZones[idx].top);
+   ObjectSetString(0,tname,OBJPROP_TEXT,obZones[idx].mitigated?"OB(used)":(obZones[idx].bullish?"OB+":"OB-"));
+   ObjectSetInteger(0,tname,OBJPROP_COLOR,c);
+   ObjectSetInteger(0,tname,OBJPROP_FONTSIZE,7);
+   ObjectSetString(0,tname,OBJPROP_FONT,"Consolas");
+   ObjectSetInteger(0,tname,OBJPROP_ANCHOR,ANCHOR_LOWER_LEFT);
+   ObjectSetInteger(0,tname,OBJPROP_SELECTABLE,false);
 }
 void RedrawAllOrderBlocks() { for(int i=0;i<obCount;i++) DrawOrderBlock(i); }
 
@@ -1015,6 +1042,15 @@ void DrawFVGZone(int idx)
    ObjectSetInteger(0,name,OBJPROP_BACK,true);
    ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
    ObjectSetInteger(0,name,OBJPROP_STYLE,fvgZones[idx].mitigated?STYLE_DOT:STYLE_SOLID);
+   string tname=name+"_T";  // [V1.8] FVG/BPR text label
+   if(ObjectFind(0,tname)>=0) ObjectDelete(0,tname);
+   ObjectCreate(0,tname,OBJ_TEXT,0,fvgZones[idx].time,fvgZones[idx].top);
+   ObjectSetString(0,tname,OBJPROP_TEXT,fvgZones[idx].mitigated?"FVG(filled)":(fvgZones[idx].bpr&&ShowBPRZones?"BPR":"FVG"));
+   ObjectSetInteger(0,tname,OBJPROP_COLOR,c);
+   ObjectSetInteger(0,tname,OBJPROP_FONTSIZE,7);
+   ObjectSetString(0,tname,OBJPROP_FONT,"Consolas");
+   ObjectSetInteger(0,tname,OBJPROP_ANCHOR,ANCHOR_LOWER_LEFT);
+   ObjectSetInteger(0,tname,OBJPROP_SELECTABLE,false);
 }
 void RedrawAllFVGZones() { for(int i=0;i<fvgZoneCount;i++) DrawFVGZone(i); }
 
@@ -1214,7 +1250,9 @@ void UpdateContextState()
      if(DetectMSS(mssB))
      { if(!mssConfirmed||mssIsBullish!=mssB)
        {mssConfirmed=true;mssIsBullish=mssB;cisd5MinConfirmed=true;cisd5MinIsBearish=!mssB;
-        cisd1MinConfirmed=false;fvgCount1Min=-1;Print("STEP 2 PASS: MSS "+(mssB?"BULL":"BEAR"));} }
+        cisd1MinConfirmed=false;fvgCount1Min=-1;Print("STEP 2 PASS: MSS "+(mssB?"BULL":"BEAR"));
+        if(ShowMSSMarkers) DrawStructureMarker(MSSMarkerNames,MSSMarkerIdx,MaxStructureMarkers,"ICTMSS","MSS/CHoCH",
+                              TimeCurrent(),SymbolInfoDouble(_Symbol,SYMBOL_BID),mssB,clrLime);} }
      else{ if(mssConfirmed){mssConfirmed=false;DebugPrint("STEP 2: MSS lost");}
            RejMSS(); lastFailedStep=2;lastFailedStepDesc="MSS (H1)";return; } }
    else
@@ -1225,20 +1263,26 @@ void UpdateContextState()
      if(found){ datetime bt5=iTime(_Symbol,PERIOD_M5,0);
        if(LastCISDTime5Min!=bt5){LastCISDTime5Min=bt5;cisd5MinConfirmed=true;cisd5MinIsBearish=tb;
          mssConfirmed=true;mssIsBullish=!tb;cisd1MinConfirmed=false;fvgCount1Min=-1;
-         Print("STEP 2 PASS: 5M CISD "+(tb?"BEAR":"BULL"));}}
+         Print("STEP 2 PASS: 5M CISD "+(tb?"BEAR":"BULL"));
+         if(ShowMSSMarkers) DrawStructureMarker(MSSMarkerNames,MSSMarkerIdx,MaxStructureMarkers,"ICTMSS","CISD(5m)",
+                               TimeCurrent(),SymbolInfoDouble(_Symbol,SYMBOL_BID),!tb,clrLime);}}
      if(!mssConfirmed){RejMSS();lastFailedStep=2;lastFailedStepDesc="5M Direction";return;} }
 
    if(effUseBOSFilter)
    { bool bosB=false;
      if(DetectBOS(bosB))
-     { if(!bosConfirmed||bosIsBullish!=bosB){bosConfirmed=true;bosIsBullish=bosB;Print("STEP 3 PASS: BOS "+(bosB?"BULL":"BEAR"));} }
+     { if(!bosConfirmed||bosIsBullish!=bosB){bosConfirmed=true;bosIsBullish=bosB;Print("STEP 3 PASS: BOS "+(bosB?"BULL":"BEAR"));
+         if(ShowBOSMarkers) DrawStructureMarker(BOSMarkerNames,BOSMarkerIdx,MaxStructureMarkers,"ICTBOS","BOS",
+                               TimeCurrent(),SymbolInfoDouble(_Symbol,SYMBOL_BID),bosB,clrDeepSkyBlue);} }
      else{ if(bosConfirmed){bosConfirmed=false;DebugPrint("STEP 3: BOS lost");}
            RejBOS(); lastFailedStep=3;lastFailedStepDesc="BOS (M15)";return; } }
    else bosConfirmed=true;
 
    if(effRequireLiqSweep)
    { bool swpB=false;
-     if(DetectLiquiditySweep(swpB)){ if(!liquiditySweepDone){liquiditySweepDone=true;sweepIsBullish=swpB;Print("STEP 4 PASS: Sweep");} }
+     if(DetectLiquiditySweep(swpB)){ if(!liquiditySweepDone){liquiditySweepDone=true;sweepIsBullish=swpB;Print("STEP 4 PASS: Sweep");
+         if(ShowLiquidityMarkers) DrawStructureMarker(LiqMarkerNames,LiqMarkerIdx,MaxStructureMarkers,"ICTSWP","SWEEP",
+                                     TimeCurrent(),SymbolInfoDouble(_Symbol,SYMBOL_BID),swpB,clrGold);} }
      else if(!liquiditySweepDone){ RejSweep(); lastFailedStep=4;lastFailedStepDesc="Liquidity Sweep";return; } }
    else liquiditySweepDone=true;
 
@@ -1876,6 +1920,42 @@ void DrawSwingLine(double price,bool isBuy,string source)
   ObjectSetInteger(0,name,OBJPROP_WIDTH,1);ObjectSetInteger(0,name,OBJPROP_STYLE,STYLE_DASH);ChartRedraw(0); }
 
 //===================================================================//
+//  [V1.8] STRUCTURE MARKERS — live arrow + text label dropped on the  //
+//  chart the instant MSS/CHoCH, BOS, or a liquidity sweep confirms,   //
+//  so you can see on the candles (not just the panel) why the entry   //
+//  sequence is or isn't progressing. Rotating buffer of maxN slots    //
+//  per type — oldest marker of that type is deleted before a new one //
+//  is drawn so the chart doesn't accumulate objects forever.          //
+//===================================================================//
+void DrawStructureMarker(string &names[],int &idx,int maxN,string prefix,string tag,
+                          datetime t,double price,bool bullish,color c)
+{
+   if(maxN<=0) return;
+   double off=MathMax(GetATR()*0.6,_Point*10);
+   double y=bullish?price-off:price+off;
+   if(names[idx]!=""){ ObjectDelete(0,names[idx]); ObjectDelete(0,names[idx]+"_T"); }
+   string name=prefix+"_"+IntegerToString(idx);
+   names[idx]=name; idx=(idx+1)%maxN;
+   if(ObjectFind(0,name)>=0) ObjectDelete(0,name);
+   ObjectCreate(0,name,OBJ_ARROW,0,t,y);
+   ObjectSetInteger(0,name,OBJPROP_ARROWCODE,bullish?SYMBOL_ARROWUP:SYMBOL_ARROWDOWN);
+   ObjectSetInteger(0,name,OBJPROP_COLOR,c);
+   ObjectSetInteger(0,name,OBJPROP_WIDTH,2);
+   ObjectSetInteger(0,name,OBJPROP_ANCHOR,ANCHOR_CENTER);
+   ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
+   string tname=name+"_T";
+   if(ObjectFind(0,tname)>=0) ObjectDelete(0,tname);
+   ObjectCreate(0,tname,OBJ_TEXT,0,t,bullish?y-off*0.4:y+off*0.4);
+   ObjectSetString(0,tname,OBJPROP_TEXT,tag+(bullish?" ^":" v"));
+   ObjectSetInteger(0,tname,OBJPROP_COLOR,c);
+   ObjectSetInteger(0,tname,OBJPROP_FONTSIZE,8);
+   ObjectSetString(0,tname,OBJPROP_FONT,"Consolas");
+   ObjectSetInteger(0,tname,OBJPROP_ANCHOR,bullish?ANCHOR_LOWER:ANCHOR_UPPER);
+   ObjectSetInteger(0,tname,OBJPROP_SELECTABLE,false);
+   ChartRedraw(0);
+}
+
+//===================================================================//
 //  PANEL HELPERS
 //===================================================================//
 void PanelLoadPosition(){string kx=PANEL_PREFIX+"PX",ky=PANEL_PREFIX+"PY";if(GlobalVariableCheck(kx))PANEL_X=(int)GlobalVariableGet(kx);if(GlobalVariableCheck(ky))PANEL_Y=(int)GlobalVariableGet(ky);}
@@ -2124,6 +2204,9 @@ int OnInit()
   if(_Digits==5||_Digits==3) PipFactor=10.0; else if(_Digits==2) PipFactor=100.0; else PipFactor=1.0;
   ArrayResize(SwingLineNames,MaxSwingLines); for(int i=0;i<MaxSwingLines;i++) SwingLineNames[i]="";
   for(int i=0;i<4;i++) OTEObjectNames[i]="";
+  ArrayResize(MSSMarkerNames,MaxStructureMarkers); for(int i=0;i<MaxStructureMarkers;i++) MSSMarkerNames[i]=""; // [V1.8]
+  ArrayResize(BOSMarkerNames,MaxStructureMarkers); for(int i=0;i<MaxStructureMarkers;i++) BOSMarkerNames[i]=""; // [V1.8]
+  ArrayResize(LiqMarkerNames,MaxStructureMarkers); for(int i=0;i<MaxStructureMarkers;i++) LiqMarkerNames[i]=""; // [V1.8]
   ArrayResize(obZones,MaxOrderBlocks);   obCount=0;      // [V1.8]
   ArrayResize(fvgZones,MaxFVGZones);     fvgZoneCount=0; // [V1.8]
   Print("════════════════════════════════════════");
@@ -2167,6 +2250,7 @@ void OnDeinit(const int reason)
   PrintFilterSummary();   // V1.3: full report to journal
   PanelDeleteAll(); ObjectsDeleteAll(0,"Twins_"); ObjectsDeleteAll(0,"OTEZO_");
   ObjectsDeleteAll(0,"ICTOB_"); ObjectsDeleteAll(0,"ICTFVG_");  // [V1.8]
+  ObjectsDeleteAll(0,"ICTMSS_"); ObjectsDeleteAll(0,"ICTBOS_"); ObjectsDeleteAll(0,"ICTSWP_"); // [V1.8]
   Comment(""); }
 
 void OnTrade()
