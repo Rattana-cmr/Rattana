@@ -919,7 +919,7 @@ void DrawOrderBlock(int idx)
    ObjectSetInteger(0,tname,OBJPROP_COLOR,c);
    ObjectSetInteger(0,tname,OBJPROP_FONTSIZE,7);
    ObjectSetString(0,tname,OBJPROP_FONT,"Consolas");
-   ObjectSetInteger(0,tname,OBJPROP_ANCHOR,ANCHOR_LOWER_LEFT);
+   ObjectSetInteger(0,tname,OBJPROP_ANCHOR,ANCHOR_LEFT_LOWER);
    ObjectSetInteger(0,tname,OBJPROP_SELECTABLE,false);
 }
 void RedrawAllOrderBlocks() { for(int i=0;i<obCount;i++) DrawOrderBlock(i); }
@@ -1049,7 +1049,7 @@ void DrawFVGZone(int idx)
    ObjectSetInteger(0,tname,OBJPROP_COLOR,c);
    ObjectSetInteger(0,tname,OBJPROP_FONTSIZE,7);
    ObjectSetString(0,tname,OBJPROP_FONT,"Consolas");
-   ObjectSetInteger(0,tname,OBJPROP_ANCHOR,ANCHOR_LOWER_LEFT);
+   ObjectSetInteger(0,tname,OBJPROP_ANCHOR,ANCHOR_LEFT_LOWER);
    ObjectSetInteger(0,tname,OBJPROP_SELECTABLE,false);
 }
 void RedrawAllFVGZones() { for(int i=0;i<fvgZoneCount;i++) DrawFVGZone(i); }
@@ -1938,7 +1938,7 @@ void DrawStructureMarker(string &names[],int &idx,int maxN,string prefix,string 
    names[idx]=name; idx=(idx+1)%maxN;
    if(ObjectFind(0,name)>=0) ObjectDelete(0,name);
    ObjectCreate(0,name,OBJ_ARROW,0,t,y);
-   ObjectSetInteger(0,name,OBJPROP_ARROWCODE,bullish?SYMBOL_ARROWUP:SYMBOL_ARROWDOWN);
+   ObjectSetInteger(0,name,OBJPROP_ARROWCODE,bullish?233:234);
    ObjectSetInteger(0,name,OBJPROP_COLOR,c);
    ObjectSetInteger(0,name,OBJPROP_WIDTH,2);
    ObjectSetInteger(0,name,OBJPROP_ANCHOR,ANCHOR_CENTER);
