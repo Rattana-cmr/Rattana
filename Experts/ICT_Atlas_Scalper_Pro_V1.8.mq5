@@ -1357,8 +1357,8 @@ void UpdateContextState()
         cisd1MinConfirmed=false;fvgCount1Min=-1;Print("STEP 2 PASS: MSS "+(mssB?"BULL":"BEAR"));
         if(ShowMSSMarkers) DrawStructureMarker(MSSMarkerNames,MSSMarkerIdx,MaxStructureMarkers,"ICTMSS","MSS/CHoCH",
                               TimeCurrent(),SymbolInfoDouble(_Symbol,SYMBOL_BID),mssB,clrLime,mssPivotT,mssPivotP);} }
-     else{ if(mssConfirmed){mssConfirmed=false;DebugPrint("STEP 2: MSS lost");}
-           RejMSS(); lastFailedStep=2;lastFailedStepDesc="MSS (H1)";return; } }
+     else if(!mssConfirmed)  // [V1.8] sticky bias: a confirmed MSS holds until a fresh opposite-direction shift flips it
+     { RejMSS(); lastFailedStep=2;lastFailedStepDesc="MSS (H1)";return; } }
    else
    { bool tb=false; bool found=IsCISD5M(tb);
      if(!found){ for(int lb=1;lb<=10;lb++){double o5=iOpen(_Symbol,PERIOD_M5,lb),cl5=iClose(_Symbol,PERIOD_M5,lb);
@@ -1387,8 +1387,8 @@ void UpdateContextState()
      { if(!bosConfirmed||bosIsBullish!=bosB){bosConfirmed=true;bosIsBullish=bosB;Print("STEP 3 PASS: BOS "+(bosB?"BULL":"BEAR"));
          if(ShowBOSMarkers) DrawStructureMarker(BOSMarkerNames,BOSMarkerIdx,MaxStructureMarkers,"ICTBOS","BOS",
                                TimeCurrent(),SymbolInfoDouble(_Symbol,SYMBOL_BID),bosB,clrDeepSkyBlue,bosPivotT,bosPivotP);} }
-     else{ if(bosConfirmed){bosConfirmed=false;DebugPrint("STEP 3: BOS lost");}
-           RejBOS(); lastFailedStep=3;lastFailedStepDesc="BOS (M15)";return; } }
+     else if(!bosConfirmed)  // [V1.8] sticky bias: a confirmed BOS holds until a fresh opposite-direction break flips it
+     { RejBOS(); lastFailedStep=3;lastFailedStepDesc="BOS (M15)";return; } }
    else bosConfirmed=true;
 
    if(effRequireLiqSweep)
