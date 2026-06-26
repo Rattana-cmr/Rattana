@@ -2471,6 +2471,7 @@ int OnInit()
   if(GlobalVariableCheck(pfx+"Loss"))   statTotalLoss  =GlobalVariableGet(pfx+"Loss");
   if(GlobalVariableCheck(pfx+"SumRR"))  statSumRR      =GlobalVariableGet(pfx+"SumRR");
   sessionStartEquity=AccountInfoDouble(ACCOUNT_EQUITY); sessionPeakEquity=sessionStartEquity;
+  UpdateKillzoneBoxes(); DetectLiquidityZones(); UpdateLiquidityZoneSweep(); // [V1.8] paint immediately on load/reload, don't wait for the first tick
   PanelLoadPosition(); return INIT_SUCCEEDED; }
 
 void OnDeinit(const int reason)
