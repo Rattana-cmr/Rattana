@@ -229,6 +229,8 @@ input int    MSSConfirmBars        = 3;
 input int    BOSLookbackBars       = 20;
 input int    LiquidityLookbackBars = 50;
 input int    LiquidityWickPips     = 3;
+input bool   ShowLiquidityZones    = true;   // Draw unswept BSL/SSL liquidity pool zones on chart
+input int    MaxLiquidityZones     = 10;     // Max liquidity pool zones tracked at once
 
 input group "========== SYMBOL PRESET =========="
 input ENUM_SYMBOL_PRESET SymbolPreset = PRESET_AUTO;
@@ -392,6 +394,12 @@ struct FVGZoneT { double top; double bottom; datetime time; bool bullish; bool m
 FVGZoneT fvgZones[];
 int      fvgZoneCount   = 0;
 datetime lastFVGScanBar = 0;
+
+// [V1.8] Liquidity pool zones (BSL above price / SSL below price)
+struct LiqZone { double level; datetime time; bool isHigh; bool swept; };
+LiqZone  liqZones[];
+int      liqZoneCount   = 0;
+datetime lastLiqScanBar = 0;
 
 int    rejKZ=0,      cumRejKZ=0;       // [V1.8]
 int    rejOB=0,      cumRejOB=0;       // [V1.8]
@@ -616,11 +624,17 @@ void DrawKillzoneBox(string name,double gmtStart,double gmtEnd,color c,string la
 {
    datetime t1=GetTodayGMTTime(gmtStart), t2=GetTodayGMTTime(gmtEnd);
    if(t2<=t1) return;
-   int hBar=iHighest(_Symbol,PERIOD_M15,MODE_HIGH,96,0), lBar=iLowest(_Symbol,PERIOD_M15,MODE_LOW,96,0);
+   datetime now=TimeCurrent();
+   if(now<t1) { ObjectDelete(0,name); ObjectDelete(0,name+"_T"); return; } // session hasn't started yet today
+   datetime scanEnd=(now<t2)?now:t2;  // [V1.8] hug the session's own price range, not the whole visible chart
+   int barFrom=iBarShift(_Symbol,PERIOD_M15,t1,false);
+   int barTo  =iBarShift(_Symbol,PERIOD_M15,scanEnd,false);
+   if(barFrom<0||barTo<0||barFrom<barTo) return;
+   int hBar=iHighest(_Symbol,PERIOD_M15,MODE_HIGH,barFrom-barTo+1,barTo), lBar=iLowest(_Symbol,PERIOD_M15,MODE_LOW,barFrom-barTo+1,barTo);
    if(hBar<0||lBar<0) return;
    double hi=iHigh(_Symbol,PERIOD_M15,hBar), lo=iLow(_Symbol,PERIOD_M15,lBar);
    if(hi<=lo) return;
-   double pad=(hi-lo)*0.15;
+   double pad=(hi-lo)*0.08;
    if(ObjectFind(0,name)>=0) ObjectDelete(0,name);
    ObjectCreate(0,name,OBJ_RECTANGLE,0,t1,hi+pad,t2,lo-pad);
    ObjectSetInteger(0,name,OBJPROP_COLOR,c);
@@ -819,6 +833,92 @@ bool DetectLiquiditySweep(bool &sweepBullish)
    { if(poolLow>0  &&m15[i].low <poolLow -wickPts&&m15[i].close>poolLow) {sweepBullish=true; return true;}
      if(poolHigh>0 &&m15[i].high>poolHigh+wickPts&&m15[i].close<poolHigh){sweepBullish=false;return true;} }
    return false;
+}
+
+//===================================================================//
+//  [V1.8] LIQUIDITY POOL ZONES — visualize the same unbroken swing  //
+//  high/low pools DetectLiquiditySweep() trades against (BSL above  //
+//  price, SSL below), extending right until swept, TradingView-style//
+//===================================================================//
+void DrawLiquidityZone(int idx)
+{
+   string name="ICTLIQ_"+IntegerToString(idx);
+   double half=LiquidityWickPips*PipFactor*_Point*0.5;
+   datetime t1=liqZones[idx].time;
+   datetime t2=TimeCurrent()+(datetime)(PeriodSeconds(PERIOD_M15)*2);
+   if(ObjectFind(0,name)>=0) ObjectDelete(0,name);
+   ObjectCreate(0,name,OBJ_RECTANGLE,0,t1,liqZones[idx].level+half,t2,liqZones[idx].level-half);
+   color c=liqZones[idx].swept?(liqZones[idx].isHigh?C'70,35,45':C'25,55,50'):(liqZones[idx].isHigh?C'200,70,100':C'40,160,140');
+   ObjectSetInteger(0,name,OBJPROP_COLOR,c);
+   ObjectSetInteger(0,name,OBJPROP_FILL,!liqZones[idx].swept);
+   ObjectSetInteger(0,name,OBJPROP_BACK,true);
+   ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
+   ObjectSetInteger(0,name,OBJPROP_STYLE,liqZones[idx].swept?STYLE_DOT:STYLE_SOLID);
+   string tname=name+"_T";
+   if(ObjectFind(0,tname)>=0) ObjectDelete(0,tname);
+   ObjectCreate(0,tname,OBJ_TEXT,0,t1,liqZones[idx].level+half);
+   ObjectSetString(0,tname,OBJPROP_TEXT,liqZones[idx].isHigh?(liqZones[idx].swept?"BSL (swept)":"BSL"):
+                                                                (liqZones[idx].swept?"SSL (swept)":"SSL"));
+   ObjectSetInteger(0,tname,OBJPROP_COLOR,c);
+   ObjectSetInteger(0,tname,OBJPROP_FONTSIZE,7);
+   ObjectSetString(0,tname,OBJPROP_FONT,"Consolas");
+   ObjectSetInteger(0,tname,OBJPROP_ANCHOR,ANCHOR_LEFT_LOWER);
+   ObjectSetInteger(0,tname,OBJPROP_SELECTABLE,false);
+}
+void RedrawAllLiquidityZones() { for(int i=0;i<liqZoneCount;i++) DrawLiquidityZone(i); }
+
+void AddLiquidityZone(double level,datetime t,bool isHigh)
+{
+   if(MaxLiquidityZones<=0) return;
+   for(int i=0;i<liqZoneCount;i++) if(liqZones[i].time==t && liqZones[i].isHigh==isHigh) return; // already tracked
+   int n=(int)MathMin(liqZoneCount+1,MaxLiquidityZones);
+   for(int i=n-1;i>0;i--) liqZones[i]=liqZones[i-1];
+   liqZones[0].level=level; liqZones[0].time=t; liqZones[0].isHigh=isHigh; liqZones[0].swept=false;
+   liqZoneCount=n;
+   if(ShowLiquidityZones) RedrawAllLiquidityZones();
+}
+
+// Scans once per closed M15 bar for the current nearest unbroken swing
+// high/low pools — the same pivot definition DetectLiquiditySweep() uses.
+void DetectLiquidityZones()
+{
+   if(!ShowLiquidityZones) return;
+   int need=LiquidityLookbackBars+5;
+   MqlRates m[]; ArraySetAsSeries(m,true);
+   if(CopyRates(_Symbol,PERIOD_M15,0,need,m)<need) return;
+   if(lastLiqScanBar==m[1].time) return;
+   lastLiqScanBar=m[1].time;
+
+   int conf=2;
+   double poolHigh=0,poolLow=0; datetime poolHighT=0,poolLowT=0;
+   for(int i=conf;i<LiquidityLookbackBars-conf;i++)
+   {
+      bool isH=true,isL=true;
+      for(int j=i-conf;j<=i+conf;j++)
+      { if(j==i||j<0||j>=need) continue;
+        if(m[j].high>=m[i].high) isH=false;
+        if(m[j].low <=m[i].low)  isL=false; }
+      if(isH&&(poolHigh==0||m[i].high>poolHigh)){poolHigh=m[i].high;poolHighT=m[i].time;}
+      if(isL&&(poolLow==0 ||m[i].low <poolLow)) {poolLow =m[i].low; poolLowT =m[i].time;}
+   }
+   if(poolHigh>0) AddLiquidityZone(poolHigh,poolHighT,true);
+   if(poolLow>0)  AddLiquidityZone(poolLow, poolLowT, false);
+}
+
+void UpdateLiquidityZoneSweep()
+{
+   double bid=SymbolInfoDouble(_Symbol,SYMBOL_BID), ask=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+   double wickPts=LiquidityWickPips*PipFactor*_Point;
+   for(int i=0;i<liqZoneCount;i++)
+   {
+      if(liqZones[i].swept) continue;
+      bool hit=liqZones[i].isHigh?(ask>=liqZones[i].level+wickPts):(bid<=liqZones[i].level-wickPts);
+      if(hit) { liqZones[i].swept=true; if(ShowLiquidityZones) DrawLiquidityZone(i); continue; }
+      if(ShowLiquidityZones)
+      { string name="ICTLIQ_"+IntegerToString(i);
+        if(ObjectFind(0,name)>=0)
+           ObjectSetInteger(0,name,OBJPROP_TIME,1,TimeCurrent()+(datetime)(PeriodSeconds(PERIOD_M15)*2)); }
+   }
 }
 
 //===================================================================//
@@ -2346,6 +2446,7 @@ int OnInit()
   ArrayResize(SMTMarkerNames,MaxStructureMarkers); for(int i=0;i<MaxStructureMarkers;i++) SMTMarkerNames[i]=""; // [V1.8]
   ArrayResize(obZones,MaxOrderBlocks);   obCount=0;      // [V1.8]
   ArrayResize(fvgZones,MaxFVGZones);     fvgZoneCount=0; // [V1.8]
+  ArrayResize(liqZones,MaxLiquidityZones); liqZoneCount=0; // [V1.8]
   Print("════════════════════════════════════════");
   Print(EA_NAME," — ICT SMART MONEY CONCEPTS");
   Print("Style    : ",EnumToString(TradingStyle));
@@ -2389,6 +2490,7 @@ void OnDeinit(const int reason)
   ObjectsDeleteAll(0,"ICTOB_"); ObjectsDeleteAll(0,"ICTFVG_");  // [V1.8]
   ObjectsDeleteAll(0,"ICTMSS_"); ObjectsDeleteAll(0,"ICTBOS_"); ObjectsDeleteAll(0,"ICTSWP_"); // [V1.8]
   ObjectsDeleteAll(0,"ICTSMT_"); ObjectsDeleteAll(0,"ICTKZ_");  // [V1.8]
+  ObjectsDeleteAll(0,"ICTLIQ_"); // [V1.8]
   Comment(""); }
 
 void OnTrade()
@@ -2422,6 +2524,7 @@ void OnTick()
 { UpdateDisplay(); CheckFridayClose(); CheckPartialTP(); ApplyBreakeven(); ApplyTrailingStop();
   UpdateMFEMAE();  // [ML] track max favorable/adverse excursion every tick
   DetectFVGZones(); UpdateOrderBlockMitigation(); UpdateFVGMitigation(); UpdateKillzoneBoxes();  // [V1.8]
+  DetectLiquidityZones(); UpdateLiquidityZoneSweep();  // [V1.8]
   if(ForceTrades){static datetime lf=0;if(TimeCurrent()-lf>=60&&CanTrade()){lf=TimeCurrent();PlaceTrade();}return;}
   if(!CanTrade()) return; if(!IsTradingTime()) return;
   datetime barTime[1]; if(CopyTime(_Symbol,PERIOD_M15,0,1,barTime)!=1) return;
