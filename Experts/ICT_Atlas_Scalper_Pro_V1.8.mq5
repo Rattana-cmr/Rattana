@@ -645,6 +645,11 @@ bool DrawKillzoneBox(string name,double gmtStart,double gmtEnd,color c,string la
    if(barFrom<0||barTo<0||barFrom<barTo)
    { if(dbg) DebugPrint("KZBox "+name+": barShift FAIL barFrom="+IntegerToString(barFrom)+" barTo="+IntegerToString(barTo)+" t1="+TimeToString(t1,TIME_SECONDS)+" scanEnd="+TimeToString(scanEnd,TIME_SECONDS)+" chartPeriod="+EnumToString(_Period)+" m15bars="+IntegerToString(Bars(_Symbol,PERIOD_M15)));
      return false; } // [V1.8] M15 series not synced yet right after a timeframe switch — signal caller to retry, don't lock the once-per-bar gate on a failed attempt
+   datetime tFrom=iTime(_Symbol,PERIOD_M15,barFrom), tTo=iTime(_Symbol,PERIOD_M15,barTo);
+   long staleTol=PeriodSeconds(PERIOD_M15)*3;
+   if(MathAbs((long)(tFrom-t1))>staleTol||MathAbs((long)(tTo-scanEnd))>staleTol)
+   { if(dbg) DebugPrint("KZBox "+name+": STALE bar match barFrom="+IntegerToString(barFrom)+" tFrom="+TimeToString(tFrom,TIME_SECONDS)+" want t1="+TimeToString(t1,TIME_SECONDS)+" barTo="+IntegerToString(barTo)+" tTo="+TimeToString(tTo,TIME_SECONDS)+" want scanEnd="+TimeToString(scanEnd,TIME_SECONDS));
+     return false; } // [V1.8] iBarShift(exact=false) can resolve to the nearest-available bar instead of failing outright when the M15 series hasn't backfilled today's data yet after a timeframe switch — reject a too-far-off match instead of drawing the box at a garbage price
    int hBar=iHighest(_Symbol,PERIOD_M15,MODE_HIGH,barFrom-barTo+1,barTo), lBar=iLowest(_Symbol,PERIOD_M15,MODE_LOW,barFrom-barTo+1,barTo);
    if(hBar<0||lBar<0) { if(dbg) DebugPrint("KZBox "+name+": hi/lo FAIL hBar="+IntegerToString(hBar)+" lBar="+IntegerToString(lBar)+" count="+IntegerToString(barFrom-barTo+1)+" barTo="+IntegerToString(barTo)); return false; }
    double hi=iHigh(_Symbol,PERIOD_M15,hBar), lo=iLow(_Symbol,PERIOD_M15,lBar);
