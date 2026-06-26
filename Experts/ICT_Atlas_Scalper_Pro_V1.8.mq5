@@ -232,6 +232,11 @@ input int    LiquidityWickPips     = 3;
 input bool   ShowLiquidityZones    = true;   // Draw unswept BSL/SSL liquidity pool zones on chart
 input int    MaxLiquidityZones     = 10;     // Max liquidity pool zones tracked at once
 
+input group "========== SWING STRUCTURE (HH/HL/LH/LL) =========="
+input bool   ShowSwingStructureLabels = true;  // [V1.8] Draw HH/HL/LH/LL labels at confirmed M15 swing pivots
+input int    SwingStructureConfirm    = 3;     // Bars required on each side to confirm a swing pivot
+input int    MaxSwingStructureLabels  = 20;    // Max swing pivot labels kept on chart at once
+
 input group "========== SYMBOL PRESET =========="
 input ENUM_SYMBOL_PRESET SymbolPreset = PRESET_AUTO;
 
@@ -400,6 +405,14 @@ struct LiqZone { double level; datetime time; bool isHigh; bool swept; };
 LiqZone  liqZones[];
 int      liqZoneCount   = 0;
 datetime lastLiqScanBar = 0;
+
+// [V1.8] Swing structure labels (HH/HL/LH/LL)
+struct SwingPivotT { double price; datetime time; bool isHigh; string tag; };
+SwingPivotT swingPivotArr[];
+int      swingPivotCount       = 0;
+datetime lastSwingStructScanBar= 0;
+double   lastSwingStructHigh   = 0;   // running last confirmed swing high, for HH/LH classification
+double   lastSwingStructLow    = 0;   // running last confirmed swing low,  for HL/LL classification
 
 int    rejKZ=0,      cumRejKZ=0;       // [V1.8]
 int    rejOB=0,      cumRejOB=0;       // [V1.8]
@@ -921,6 +934,68 @@ void UpdateLiquidityZoneSweep()
         if(ObjectFind(0,name)>=0)
            ObjectSetInteger(0,name,OBJPROP_TIME,1,TimeCurrent()+(datetime)(PeriodSeconds(PERIOD_M15)*2)); }
    }
+}
+
+//===================================================================//
+//  [V1.8] SWING STRUCTURE LABELS — HH / HL / LH / LL
+//  Classic ICT/price-action pivot labeling on M15: each confirmed swing
+//  high is tagged HH (higher than the prior swing high) or LH (lower);
+//  each confirmed swing low is tagged HL (higher than the prior swing
+//  low) or LL (lower). Purely visual — independent of the trade gate.
+//===================================================================//
+void DrawSwingPivotLabel(int idx)
+{
+   string name="ICTSWING_"+IntegerToString(idx);
+   if(ObjectFind(0,name)>=0) ObjectDelete(0,name);
+   ObjectCreate(0,name,OBJ_TEXT,0,swingPivotArr[idx].time,swingPivotArr[idx].price);
+   ObjectSetString(0,name,OBJPROP_TEXT,swingPivotArr[idx].tag);
+   bool bullishTag=(swingPivotArr[idx].tag=="HH"||swingPivotArr[idx].tag=="HL");
+   ObjectSetInteger(0,name,OBJPROP_COLOR,bullishTag?clrLime:clrTomato);
+   ObjectSetInteger(0,name,OBJPROP_FONTSIZE,8);
+   ObjectSetString(0,name,OBJPROP_FONT,"Consolas");
+   ObjectSetInteger(0,name,OBJPROP_ANCHOR,swingPivotArr[idx].isHigh?ANCHOR_LOWER:ANCHOR_UPPER);
+   ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
+   ObjectSetInteger(0,name,OBJPROP_BACK,false);
+}
+void RedrawAllSwingPivots() { for(int i=0;i<swingPivotCount;i++) DrawSwingPivotLabel(i); }
+
+void AddSwingPivot(double price,datetime t,bool isHigh,string tag)
+{
+   if(MaxSwingStructureLabels<=0) return;
+   if(swingPivotCount>0 && swingPivotArr[0].time==t && swingPivotArr[0].isHigh==isHigh) return;
+   int n=(int)MathMin(swingPivotCount+1,MaxSwingStructureLabels);
+   for(int i=n-1;i>0;i--) swingPivotArr[i]=swingPivotArr[i-1];
+   swingPivotArr[0].price=price; swingPivotArr[0].time=t;
+   swingPivotArr[0].isHigh=isHigh; swingPivotArr[0].tag=tag;
+   swingPivotCount=n;
+   if(ShowSwingStructureLabels) RedrawAllSwingPivots();
+}
+
+void DetectSwingStructure()
+{
+   if(!ShowSwingStructureLabels) return;
+   int conf=(int)MathMax(1,SwingStructureConfirm);
+   int need=conf*2+10;
+   MqlRates m[]; ArraySetAsSeries(m,true);
+   if(CopyRates(_Symbol,PERIOD_M15,0,need,m)<need) return;
+   if(lastSwingStructScanBar==m[1].time) return;
+   lastSwingStructScanBar=m[1].time;
+
+   int ci=conf;  // bar that just gained its full conf-bars-on-each-side confirmation window
+   bool isH=true,isL=true;
+   for(int j=ci-conf;j<=ci+conf;j++)
+   { if(j==ci||j<0||j>=need) continue;
+     if(m[j].high>=m[ci].high) isH=false;
+     if(m[j].low <=m[ci].low)  isL=false; }
+
+   if(isH)
+   { string tag=(lastSwingStructHigh>0 && m[ci].high<=lastSwingStructHigh)?"LH":"HH";
+     lastSwingStructHigh=m[ci].high;
+     AddSwingPivot(m[ci].high,m[ci].time,true,tag); }
+   if(isL)
+   { string tag=(lastSwingStructLow>0 && m[ci].low>=lastSwingStructLow)?"LL":"HL";
+     lastSwingStructLow=m[ci].low;
+     AddSwingPivot(m[ci].low,m[ci].time,false,tag); }
 }
 
 //===================================================================//
@@ -2484,6 +2559,17 @@ void SaveSequenceState(string pfx)
    GlobalVariableSet(zp+"lastOB", (double)lastOBScanBar);
    GlobalVariableSet(zp+"lastFVG",(double)lastFVGScanBar);
    GlobalVariableSet(zp+"lastLIQ",(double)lastLiqScanBar);
+
+   GlobalVariableSet(zp+"SWn",swingPivotCount);
+   for(int i=0;i<swingPivotCount;i++)
+   { string b=zp+"SW"+IntegerToString(i)+"_";
+     GlobalVariableSet(b+"px",  swingPivotArr[i].price);
+     GlobalVariableSet(b+"t",   (double)swingPivotArr[i].time);
+     GlobalVariableSet(b+"high",swingPivotArr[i].isHigh?1:0);
+     GlobalVariableSet(b+"tag", swingPivotArr[i].tag=="HH"?0:swingPivotArr[i].tag=="LH"?1:swingPivotArr[i].tag=="HL"?2:3); }
+   GlobalVariableSet(zp+"lastSW",   (double)lastSwingStructScanBar);
+   GlobalVariableSet(zp+"swHigh",   lastSwingStructHigh);
+   GlobalVariableSet(zp+"swLow",    lastSwingStructLow);
 }
 
 void LoadSequenceState(string pfx)
@@ -2539,9 +2625,23 @@ void LoadSequenceState(string pfx)
    lastFVGScanBar=(datetime)GlobalVariableGet(zp+"lastFVG");
    lastLiqScanBar=(datetime)GlobalVariableGet(zp+"lastLIQ");
 
-   if(ShowOrderBlocks)    RedrawAllOrderBlocks();
-   if(ShowFVGZones)       RedrawAllFVGZones();
-   if(ShowLiquidityZones) RedrawAllLiquidityZones();
+   string swTags[4]={"HH","LH","HL","LL"};
+   swingPivotCount=(int)MathMax(0,MathMin(GlobalVariableGet(zp+"SWn"),MaxSwingStructureLabels));
+   for(int i=0;i<swingPivotCount;i++)
+   { string b=zp+"SW"+IntegerToString(i)+"_";
+     swingPivotArr[i].price =GlobalVariableGet(b+"px");
+     swingPivotArr[i].time  =(datetime)GlobalVariableGet(b+"t");
+     swingPivotArr[i].isHigh=GlobalVariableGet(b+"high")!=0;
+     int tg=(int)MathMax(0,MathMin(GlobalVariableGet(b+"tag"),3));
+     swingPivotArr[i].tag   =swTags[tg]; }
+   lastSwingStructScanBar=(datetime)GlobalVariableGet(zp+"lastSW");
+   lastSwingStructHigh   =GlobalVariableGet(zp+"swHigh");
+   lastSwingStructLow    =GlobalVariableGet(zp+"swLow");
+
+   if(ShowOrderBlocks)         RedrawAllOrderBlocks();
+   if(ShowFVGZones)            RedrawAllFVGZones();
+   if(ShowLiquidityZones)      RedrawAllLiquidityZones();
+   if(ShowSwingStructureLabels)RedrawAllSwingPivots();
 }
 
 //===================================================================//
@@ -2567,6 +2667,7 @@ int OnInit()
   ArrayResize(obZones,MaxOrderBlocks);   obCount=0;      // [V1.8]
   ArrayResize(fvgZones,MaxFVGZones);     fvgZoneCount=0; // [V1.8]
   ArrayResize(liqZones,MaxLiquidityZones); liqZoneCount=0; // [V1.8]
+  ArrayResize(swingPivotArr,MaxSwingStructureLabels); swingPivotCount=0; // [V1.8]
   Print("════════════════════════════════════════");
   Print(EA_NAME," — ICT SMART MONEY CONCEPTS");
   Print("Style    : ",EnumToString(TradingStyle));
@@ -2592,7 +2693,7 @@ int OnInit()
   if(GlobalVariableCheck(pfx+"SumRR"))  statSumRR      =GlobalVariableGet(pfx+"SumRR");
   LoadSequenceState(pfx); // [V1.8] restore MSS/BOS/sweep gate + OB/FVG/liquidity zone history across reinit (timeframe switch, recompile, etc.)
   sessionStartEquity=AccountInfoDouble(ACCOUNT_EQUITY); sessionPeakEquity=sessionStartEquity;
-  UpdateKillzoneBoxes(); DetectLiquidityZones(); UpdateLiquidityZoneSweep(); // [V1.8] paint immediately on load/reload, don't wait for the first tick
+  UpdateKillzoneBoxes(); DetectLiquidityZones(); UpdateLiquidityZoneSweep(); DetectSwingStructure(); // [V1.8] paint immediately on load/reload, don't wait for the first tick
   PanelLoadPosition(); return INIT_SUCCEEDED; }
 
 void OnDeinit(const int reason)
@@ -2614,6 +2715,7 @@ void OnDeinit(const int reason)
   ObjectsDeleteAll(0,"ICTMSS_"); ObjectsDeleteAll(0,"ICTBOS_"); ObjectsDeleteAll(0,"ICTSWP_"); // [V1.8]
   ObjectsDeleteAll(0,"ICTSMT_"); ObjectsDeleteAll(0,"ICTKZ_");  // [V1.8]
   ObjectsDeleteAll(0,"ICTLIQ_"); // [V1.8]
+  ObjectsDeleteAll(0,"ICTSWING_"); // [V1.8]
   Comment(""); }
 
 void OnTrade()
@@ -2647,7 +2749,7 @@ void OnTick()
 { UpdateDisplay(); CheckFridayClose(); CheckPartialTP(); ApplyBreakeven(); ApplyTrailingStop();
   UpdateMFEMAE();  // [ML] track max favorable/adverse excursion every tick
   DetectFVGZones(); UpdateOrderBlockMitigation(); UpdateFVGMitigation(); UpdateKillzoneBoxes();  // [V1.8]
-  DetectLiquidityZones(); UpdateLiquidityZoneSweep();  // [V1.8]
+  DetectLiquidityZones(); UpdateLiquidityZoneSweep(); DetectSwingStructure();  // [V1.8]
   if(ForceTrades){static datetime lf=0;if(TimeCurrent()-lf>=60&&CanTrade()){lf=TimeCurrent();PlaceTrade();}return;}
   if(!CanTrade()) return; if(!IsTradingTime()) return;
   datetime barTime[1]; if(CopyTime(_Symbol,PERIOD_M15,0,1,barTime)!=1) return;
