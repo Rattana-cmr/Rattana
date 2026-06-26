@@ -856,14 +856,16 @@ void DrawLiquidityZone(int idx)
    ObjectSetInteger(0,name,OBJPROP_STYLE,liqZones[idx].swept?STYLE_DOT:STYLE_SOLID);
    string tname=name+"_T";
    if(ObjectFind(0,tname)>=0) ObjectDelete(0,tname);
-   ObjectCreate(0,tname,OBJ_TEXT,0,t1,liqZones[idx].level+half);
-   ObjectSetString(0,tname,OBJPROP_TEXT,liqZones[idx].isHigh?(liqZones[idx].swept?"BSL (swept)":"BSL"):
-                                                                (liqZones[idx].swept?"SSL (swept)":"SSL"));
-   ObjectSetInteger(0,tname,OBJPROP_COLOR,c);
-   ObjectSetInteger(0,tname,OBJPROP_FONTSIZE,7);
-   ObjectSetString(0,tname,OBJPROP_FONT,"Consolas");
-   ObjectSetInteger(0,tname,OBJPROP_ANCHOR,ANCHOR_LEFT_LOWER);
-   ObjectSetInteger(0,tname,OBJPROP_SELECTABLE,false);
+   if(!liqZones[idx].swept)  // [V1.8] only label the live pool — swept ones keep their dimmed box but drop the text to avoid label pile-up
+   {
+      ObjectCreate(0,tname,OBJ_TEXT,0,t1,liqZones[idx].level+half);
+      ObjectSetString(0,tname,OBJPROP_TEXT,liqZones[idx].isHigh?"BSL":"SSL");
+      ObjectSetInteger(0,tname,OBJPROP_COLOR,c);
+      ObjectSetInteger(0,tname,OBJPROP_FONTSIZE,7);
+      ObjectSetString(0,tname,OBJPROP_FONT,"Consolas");
+      ObjectSetInteger(0,tname,OBJPROP_ANCHOR,ANCHOR_LEFT_LOWER);
+      ObjectSetInteger(0,tname,OBJPROP_SELECTABLE,false);
+   }
 }
 void RedrawAllLiquidityZones() { for(int i=0;i<liqZoneCount;i++) DrawLiquidityZone(i); }
 
