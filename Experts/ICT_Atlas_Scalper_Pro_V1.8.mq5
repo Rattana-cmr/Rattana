@@ -1810,7 +1810,7 @@ bool CanTrade()
   if(MaxDailyLossTrades>0&&TodayLossTrades>=MaxDailyLossTrades){if(canLog){Print("CANTRADE: Loss limit");lastLog=TimeCurrent();}return false;}
   if(consecutiveLosses>=MaxConsecutiveLosses){if(canLog){Print("CANTRADE: ConsecLoss");lastLog=TimeCurrent();}return false;}
   if(!IsSpreadOK()){if(canLog){DebugPrint("CANTRADE: Spread");lastLog=TimeCurrent();}return false;}
-  if(IsPositionOpen()) return false;
+  if(IsPositionOpen()){if(canLog){DebugPrint("CANTRADE: Position already open");lastLog=TimeCurrent();}return false;}
   if(effCooldown>0&&LastTradeCloseTime>0&&TimeCurrent()-LastTradeCloseTime<(datetime)(effCooldown*60))
   {if(canLog){Print("CANTRADE: Cooldown ",effCooldown,"m");lastLog=TimeCurrent();}return false;}
   return true; }
@@ -2765,7 +2765,16 @@ void OnTick()
   DetectFVGZones(); UpdateOrderBlockMitigation(); UpdateFVGMitigation(); UpdateKillzoneBoxes();  // [V1.8]
   DetectLiquidityZones(); UpdateLiquidityZoneSweep(); DetectSwingStructure();  // [V1.8]
   if(ForceTrades){static datetime lf=0;if(TimeCurrent()-lf>=60&&CanTrade()){lf=TimeCurrent();PlaceTrade();}return;}
-  if(!CanTrade()) return; if(!IsTradingTime()) return;
+  if(!CanTrade()) return;
+  if(!IsTradingTime())
+  { static datetime lastTTLog=0;
+    if(DebugMode&&TimeCurrent()-lastTTLog>=60)
+    { lastTTLog=TimeCurrent();
+      DebugPrint("Blocked: outside trading hours (GMT hour="+DoubleToString(GetGMTHour(),1)+
+                 " BestHoursOnly="+(effBestHoursOnly?"ON":"off")+
+                 " Sydney="+(SessionSydney?"ON":"off")+" Tokyo="+(SessionTokyo?"ON":"off")+
+                 " London="+(SessionLondon?"ON":"off")+" NY="+(SessionNewYork?"ON":"off")+")"); }
+    return; }
   datetime barTime[1]; if(CopyTime(_Symbol,PERIOD_M15,0,1,barTime)!=1) return;
   if(effCooldown>0&&LastTradeCloseTime>0&&TimeCurrent()-LastTradeCloseTime<(datetime)(effCooldown*60)) return;
   if(barTime[0]!=LastBarTime){LastBarTime=barTime[0];cisd1MinConfirmed=false;UpdateContextState();}
