@@ -2771,6 +2771,7 @@ void OnTick()
     if(DebugMode&&TimeCurrent()-lastTTLog>=60)
     { lastTTLog=TimeCurrent();
       DebugPrint("Blocked: outside trading hours (GMT hour="+DoubleToString(GetGMTHour(),1)+
+                 " FridayCutoff="+(IsFridayCutoff()?"ACTIVE (CloseOnFriday="+(CloseOnFriday?"on":"off")+" cutoffHr="+IntegerToString(FridayCloseHour)+")":"no")+
                  " BestHoursOnly="+(effBestHoursOnly?"ON":"off")+
                  " Sydney="+(SessionSydney?"ON":"off")+" Tokyo="+(SessionTokyo?"ON":"off")+
                  " London="+(SessionLondon?"ON":"off")+" NY="+(SessionNewYork?"ON":"off")+")"); }
