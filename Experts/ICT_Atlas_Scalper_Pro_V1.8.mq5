@@ -1233,13 +1233,16 @@ void DrawFVGZone(int idx)
    ObjectSetInteger(0,name,OBJPROP_STYLE,fvgZones[idx].mitigated?STYLE_DOT:STYLE_SOLID);
    string tname=name+"_T";  // [V1.8] FVG/BPR text label
    if(ObjectFind(0,tname)>=0) ObjectDelete(0,tname);
-   ObjectCreate(0,tname,OBJ_TEXT,0,fvgZones[idx].time,fvgZones[idx].top);
-   ObjectSetString(0,tname,OBJPROP_TEXT,fvgZones[idx].mitigated?"FVG(filled)":(fvgZones[idx].bpr&&ShowBPRZones?"BPR":"FVG"));
-   ObjectSetInteger(0,tname,OBJPROP_COLOR,c);
-   ObjectSetInteger(0,tname,OBJPROP_FONTSIZE,7);
-   ObjectSetString(0,tname,OBJPROP_FONT,"Consolas");
-   ObjectSetInteger(0,tname,OBJPROP_ANCHOR,ANCHOR_LEFT_LOWER);
-   ObjectSetInteger(0,tname,OBJPROP_SELECTABLE,false);
+   if(!fvgZones[idx].mitigated)  // [V1.8] only label live FVG/BPR zones — mitigated ones keep their dimmed box but drop the text to avoid label pile-up
+   {
+      ObjectCreate(0,tname,OBJ_TEXT,0,fvgZones[idx].time,fvgZones[idx].top);
+      ObjectSetString(0,tname,OBJPROP_TEXT,fvgZones[idx].bpr&&ShowBPRZones?"BPR":"FVG");
+      ObjectSetInteger(0,tname,OBJPROP_COLOR,c);
+      ObjectSetInteger(0,tname,OBJPROP_FONTSIZE,7);
+      ObjectSetString(0,tname,OBJPROP_FONT,"Consolas");
+      ObjectSetInteger(0,tname,OBJPROP_ANCHOR,ANCHOR_LEFT_LOWER);
+      ObjectSetInteger(0,tname,OBJPROP_SELECTABLE,false);
+   }
 }
 void RedrawAllFVGZones() { for(int i=0;i<fvgZoneCount;i++) DrawFVGZone(i); }
 
@@ -2427,6 +2430,121 @@ void OnChartEvent(const int id,const long& lparam,const double& dparam,const str
   if(id==CHARTEVENT_CLICK&&panelDragging){panelDragging=false;PanelSavePosition();} }
 
 //===================================================================//
+//  [V1.8] SEQUENCE-STATE PERSISTENCE
+//  Plain globals reset on every OnDeinit/OnInit cycle (timeframe/symbol
+//  switch, recompile, parameter change, etc). Mirror the existing stats
+//  persistence pattern so the MSS/BOS/sweep gate and zone history survive
+//  a reinit instead of restarting the whole sequence from Step 1.
+//===================================================================//
+void SaveSequenceState(string pfx)
+{
+   string sp=pfx+"Seq_";
+   GlobalVariableSet(sp+"HTF",      htfLevelReached    ?1:0);
+   GlobalVariableSet(sp+"MSSConf",  mssConfirmed       ?1:0);
+   GlobalVariableSet(sp+"MSSBull",  mssIsBullish       ?1:0);
+   GlobalVariableSet(sp+"BOSConf",  bosConfirmed       ?1:0);
+   GlobalVariableSet(sp+"BOSBull",  bosIsBullish       ?1:0);
+   GlobalVariableSet(sp+"SwpDone",  liquiditySweepDone ?1:0);
+   GlobalVariableSet(sp+"SwpBull",  sweepIsBullish     ?1:0);
+   GlobalVariableSet(sp+"SMTConf",  smtConfirmed       ?1:0);
+   GlobalVariableSet(sp+"SMTBull",  smtIsBullish       ?1:0);
+   GlobalVariableSet(sp+"CISD5Conf",cisd5MinConfirmed  ?1:0);
+   GlobalVariableSet(sp+"CISD5Bear",cisd5MinIsBearish  ?1:0);
+   GlobalVariableSet(sp+"CISD1Conf",cisd1MinConfirmed  ?1:0);
+   GlobalVariableSet(sp+"FVG1M",    fvgCount1Min);
+   GlobalVariableSet(sp+"LastCISDT",(double)LastCISDTime5Min);
+
+   string zp=pfx+"Zone_";
+   GlobalVariableSet(zp+"OBn",obCount);
+   for(int i=0;i<obCount;i++)
+   { string b=zp+"OB"+IntegerToString(i)+"_";
+     GlobalVariableSet(b+"top", obZones[i].top);    GlobalVariableSet(b+"bot",obZones[i].bottom);
+     GlobalVariableSet(b+"t",   (double)obZones[i].time);
+     GlobalVariableSet(b+"bull",obZones[i].bullish ?1:0);
+     GlobalVariableSet(b+"mit", obZones[i].mitigated?1:0);
+     GlobalVariableSet(b+"brk", obZones[i].breaker ?1:0); }
+
+   GlobalVariableSet(zp+"FVGn",fvgZoneCount);
+   for(int i=0;i<fvgZoneCount;i++)
+   { string b=zp+"FVG"+IntegerToString(i)+"_";
+     GlobalVariableSet(b+"top", fvgZones[i].top);    GlobalVariableSet(b+"bot",fvgZones[i].bottom);
+     GlobalVariableSet(b+"t",   (double)fvgZones[i].time);
+     GlobalVariableSet(b+"bull",fvgZones[i].bullish ?1:0);
+     GlobalVariableSet(b+"mit", fvgZones[i].mitigated?1:0);
+     GlobalVariableSet(b+"bpr", fvgZones[i].bpr     ?1:0); }
+
+   GlobalVariableSet(zp+"LIQn",liqZoneCount);
+   for(int i=0;i<liqZoneCount;i++)
+   { string b=zp+"LIQ"+IntegerToString(i)+"_";
+     GlobalVariableSet(b+"lvl",  liqZones[i].level);
+     GlobalVariableSet(b+"t",    (double)liqZones[i].time);
+     GlobalVariableSet(b+"high", liqZones[i].isHigh?1:0);
+     GlobalVariableSet(b+"swept",liqZones[i].swept ?1:0); }
+
+   GlobalVariableSet(zp+"lastOB", (double)lastOBScanBar);
+   GlobalVariableSet(zp+"lastFVG",(double)lastFVGScanBar);
+   GlobalVariableSet(zp+"lastLIQ",(double)lastLiqScanBar);
+}
+
+void LoadSequenceState(string pfx)
+{
+   string sp=pfx+"Seq_";
+   if(!GlobalVariableCheck(sp+"MSSConf")) return;  // nothing persisted yet (first-ever load)
+
+   htfLevelReached   =GlobalVariableGet(sp+"HTF")      !=0;
+   mssConfirmed      =GlobalVariableGet(sp+"MSSConf")  !=0;
+   mssIsBullish      =GlobalVariableGet(sp+"MSSBull")  !=0;
+   bosConfirmed      =GlobalVariableGet(sp+"BOSConf")  !=0;
+   bosIsBullish      =GlobalVariableGet(sp+"BOSBull")  !=0;
+   liquiditySweepDone=GlobalVariableGet(sp+"SwpDone")  !=0;
+   sweepIsBullish    =GlobalVariableGet(sp+"SwpBull")  !=0;
+   smtConfirmed      =GlobalVariableGet(sp+"SMTConf")  !=0;
+   smtIsBullish      =GlobalVariableGet(sp+"SMTBull")  !=0;
+   cisd5MinConfirmed =GlobalVariableGet(sp+"CISD5Conf")!=0;
+   cisd5MinIsBearish =GlobalVariableGet(sp+"CISD5Bear")!=0;
+   cisd1MinConfirmed =GlobalVariableGet(sp+"CISD1Conf")!=0;
+   fvgCount1Min      =(int)GlobalVariableGet(sp+"FVG1M");
+   LastCISDTime5Min  =(datetime)GlobalVariableGet(sp+"LastCISDT");
+
+   string zp=pfx+"Zone_";
+   obCount=(int)MathMax(0,MathMin(GlobalVariableGet(zp+"OBn"),MaxOrderBlocks));
+   for(int i=0;i<obCount;i++)
+   { string b=zp+"OB"+IntegerToString(i)+"_";
+     obZones[i].top      =GlobalVariableGet(b+"top");
+     obZones[i].bottom   =GlobalVariableGet(b+"bot");
+     obZones[i].time     =(datetime)GlobalVariableGet(b+"t");
+     obZones[i].bullish  =GlobalVariableGet(b+"bull")!=0;
+     obZones[i].mitigated=GlobalVariableGet(b+"mit") !=0;
+     obZones[i].breaker  =GlobalVariableGet(b+"brk") !=0; }
+
+   fvgZoneCount=(int)MathMax(0,MathMin(GlobalVariableGet(zp+"FVGn"),MaxFVGZones));
+   for(int i=0;i<fvgZoneCount;i++)
+   { string b=zp+"FVG"+IntegerToString(i)+"_";
+     fvgZones[i].top      =GlobalVariableGet(b+"top");
+     fvgZones[i].bottom   =GlobalVariableGet(b+"bot");
+     fvgZones[i].time     =(datetime)GlobalVariableGet(b+"t");
+     fvgZones[i].bullish  =GlobalVariableGet(b+"bull")!=0;
+     fvgZones[i].mitigated=GlobalVariableGet(b+"mit") !=0;
+     fvgZones[i].bpr      =GlobalVariableGet(b+"bpr") !=0; }
+
+   liqZoneCount=(int)MathMax(0,MathMin(GlobalVariableGet(zp+"LIQn"),MaxLiquidityZones));
+   for(int i=0;i<liqZoneCount;i++)
+   { string b=zp+"LIQ"+IntegerToString(i)+"_";
+     liqZones[i].level =GlobalVariableGet(b+"lvl");
+     liqZones[i].time  =(datetime)GlobalVariableGet(b+"t");
+     liqZones[i].isHigh=GlobalVariableGet(b+"high")!=0;
+     liqZones[i].swept =GlobalVariableGet(b+"swept")!=0; }
+
+   lastOBScanBar =(datetime)GlobalVariableGet(zp+"lastOB");
+   lastFVGScanBar=(datetime)GlobalVariableGet(zp+"lastFVG");
+   lastLiqScanBar=(datetime)GlobalVariableGet(zp+"lastLIQ");
+
+   if(ShowOrderBlocks)    RedrawAllOrderBlocks();
+   if(ShowFVGZones)       RedrawAllFVGZones();
+   if(ShowLiquidityZones) RedrawAllLiquidityZones();
+}
+
+//===================================================================//
 //  INIT / DEINIT / ONTRADE / ONTICK
 //===================================================================//
 int OnInit()
@@ -2472,6 +2590,7 @@ int OnInit()
   if(GlobalVariableCheck(pfx+"Profit")) statTotalProfit=GlobalVariableGet(pfx+"Profit");
   if(GlobalVariableCheck(pfx+"Loss"))   statTotalLoss  =GlobalVariableGet(pfx+"Loss");
   if(GlobalVariableCheck(pfx+"SumRR"))  statSumRR      =GlobalVariableGet(pfx+"SumRR");
+  LoadSequenceState(pfx); // [V1.8] restore MSS/BOS/sweep gate + OB/FVG/liquidity zone history across reinit (timeframe switch, recompile, etc.)
   sessionStartEquity=AccountInfoDouble(ACCOUNT_EQUITY); sessionPeakEquity=sessionStartEquity;
   UpdateKillzoneBoxes(); DetectLiquidityZones(); UpdateLiquidityZoneSweep(); // [V1.8] paint immediately on load/reload, don't wait for the first tick
   PanelLoadPosition(); return INIT_SUCCEEDED; }
@@ -2488,6 +2607,7 @@ void OnDeinit(const int reason)
   GlobalVariableSet(pfx+"Trades",statTotalTrades);GlobalVariableSet(pfx+"Wins",statWins);
   GlobalVariableSet(pfx+"Losses",statLosses);GlobalVariableSet(pfx+"Profit",statTotalProfit);
   GlobalVariableSet(pfx+"Loss",statTotalLoss);GlobalVariableSet(pfx+"SumRR",statSumRR);
+  SaveSequenceState(pfx); // [V1.8] survive reinit (timeframe/symbol switch, recompile, parameter change, ...)
   PrintFilterSummary();   // V1.3: full report to journal
   PanelDeleteAll(); ObjectsDeleteAll(0,"Twins_"); ObjectsDeleteAll(0,"OTEZO_");
   ObjectsDeleteAll(0,"ICTOB_"); ObjectsDeleteAll(0,"ICTFVG_");  // [V1.8]
