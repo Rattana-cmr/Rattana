@@ -633,20 +633,20 @@ datetime GetTodayGMTTime(double gmtHour)
    return brokerMidnight+(datetime)MathRound((gmtHour+offset)*3600.0);
 }
 
-void DrawKillzoneBox(string name,double gmtStart,double gmtEnd,color c,string label)
+bool DrawKillzoneBox(string name,double gmtStart,double gmtEnd,color c,string label)
 {
    datetime t1=GetTodayGMTTime(gmtStart), t2=GetTodayGMTTime(gmtEnd);
-   if(t2<=t1) return;
+   if(t2<=t1) return true; // invalid window config, not a data issue — nothing to draw, no need to retry
    datetime now=TimeCurrent();
-   if(now<t1) { ObjectDelete(0,name); ObjectDelete(0,name+"_T"); return; } // session hasn't started yet today
+   if(now<t1) { ObjectDelete(0,name); ObjectDelete(0,name+"_T"); return true; } // session hasn't started yet today
    datetime scanEnd=(now<t2)?now:t2;  // [V1.8] hug the session's own price range, not the whole visible chart
    int barFrom=iBarShift(_Symbol,PERIOD_M15,t1,false);
    int barTo  =iBarShift(_Symbol,PERIOD_M15,scanEnd,false);
-   if(barFrom<0||barTo<0||barFrom<barTo) return;
+   if(barFrom<0||barTo<0||barFrom<barTo) return false; // [V1.8] M15 series not synced yet right after a timeframe switch — signal caller to retry, don't lock the once-per-bar gate on a failed attempt
    int hBar=iHighest(_Symbol,PERIOD_M15,MODE_HIGH,barFrom-barTo+1,barTo), lBar=iLowest(_Symbol,PERIOD_M15,MODE_LOW,barFrom-barTo+1,barTo);
-   if(hBar<0||lBar<0) return;
+   if(hBar<0||lBar<0) return false;
    double hi=iHigh(_Symbol,PERIOD_M15,hBar), lo=iLow(_Symbol,PERIOD_M15,lBar);
-   if(hi<=lo) return;
+   if(hi<=lo) return false;
    double pad=(hi-lo)*0.08;
    if(ObjectFind(0,name)>=0) ObjectDelete(0,name);
    ObjectCreate(0,name,OBJ_RECTANGLE,0,t1,hi+pad,t2,lo-pad);
@@ -664,6 +664,7 @@ void DrawKillzoneBox(string name,double gmtStart,double gmtEnd,color c,string la
    ObjectSetString(0,tname,OBJPROP_FONT,"Consolas");
    ObjectSetInteger(0,tname,OBJPROP_ANCHOR,ANCHOR_LEFT_LOWER);
    ObjectSetInteger(0,tname,OBJPROP_SELECTABLE,false);
+   return true;
 }
 
 void UpdateKillzoneBoxes()
@@ -671,16 +672,17 @@ void UpdateKillzoneBoxes()
    if(!ShowKillzoneBoxes) return;
    static datetime lastDraw=0;
    datetime barTime=iTime(_Symbol,PERIOD_M15,0);
-   if(barTime==lastDraw) return;
-   lastDraw=barTime;
-   if(KZAsian)     DrawKillzoneBox("ICTKZ_ASIA",1.0,5.0,C'40,90,190',"Asian KZ");
+   if(barTime!=0 && barTime==lastDraw) return;  // [V1.8] never lock the gate on barTime==0 (M15 series not loaded yet right after a timeframe/symbol switch) — keep retrying every tick until it is
+   bool allOk=true;
+   if(KZAsian)     { if(!DrawKillzoneBox("ICTKZ_ASIA",1.0,5.0,C'40,90,190',"Asian KZ"))     allOk=false; }
    else            { ObjectDelete(0,"ICTKZ_ASIA"); ObjectDelete(0,"ICTKZ_ASIA_T"); }
-   if(KZLondon)    DrawKillzoneBox("ICTKZ_LDN",7.0,10.0,C'40,170,90',"London KZ");
+   if(KZLondon)    { if(!DrawKillzoneBox("ICTKZ_LDN",7.0,10.0,C'40,170,90',"London KZ"))    allOk=false; }
    else            { ObjectDelete(0,"ICTKZ_LDN"); ObjectDelete(0,"ICTKZ_LDN_T"); }
-   if(KZNewYorkAM) DrawKillzoneBox("ICTKZ_NYAM",12.0,15.0,C'210,130,20',"NY AM KZ");
+   if(KZNewYorkAM) { if(!DrawKillzoneBox("ICTKZ_NYAM",12.0,15.0,C'210,130,20',"NY AM KZ"))  allOk=false; }
    else            { ObjectDelete(0,"ICTKZ_NYAM"); ObjectDelete(0,"ICTKZ_NYAM_T"); }
-   if(KZNewYorkPM) DrawKillzoneBox("ICTKZ_NYPM",18.5,21.0,C'190,40,180',"NY PM KZ");
+   if(KZNewYorkPM) { if(!DrawKillzoneBox("ICTKZ_NYPM",18.5,21.0,C'190,40,180',"NY PM KZ"))  allOk=false; }
    else            { ObjectDelete(0,"ICTKZ_NYPM"); ObjectDelete(0,"ICTKZ_NYPM_T"); }
+   if(allOk) lastDraw=barTime;  // [V1.8] only lock the once-per-bar gate once every enabled killzone box actually rendered — a failed/data-not-ready attempt retries next tick instead of waiting up to 15 min for the next M15 bar
    ChartRedraw(0);
 }
 
