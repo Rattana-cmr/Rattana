@@ -85,6 +85,14 @@ input group "========== DEBUG =========="
 input bool     ForceTrades            = false;    // Force trades (testing only)
 input bool     UsePythonRisk          = false;    // AI risk control
 
+//===================== MULTI-SYMBOL (EXTRA) =====================//
+input group "========== MULTI-SYMBOL (EXTRA) =========="
+input string   ExtraTradeSymbols      = "GBPUSD,EURUSD,XAGUSD"; // CSV list of extra symbols. Empty = single-symbol behavior
+input bool     ExtraSymbolsEnabled    = true;     // Master kill-switch for the extra-symbol engine
+input double   ExtraRiskPercent       = 0.0;      // Risk % per trade for extras. 0 = reuse RiskPercent
+input int      ExtraMaxTradesPerDay   = 0;        // Per-extra-symbol daily trade cap. 0 = use MaxTradesPerDay
+input bool     ExtraDebugLog          = false;    // Print debug info for the extra-symbol engine
+
 //===================== GLOBAL VARIABLES =====================//
 int ATRHandle;
 int FastEMAHandle;
@@ -106,6 +114,20 @@ bool PanelCollapsed = false;
 bool PanelDragging  = false;
 int  DragOffsetX    = 0;
 int  DragOffsetY    = 0;
+
+//===================== MULTI-SYMBOL (EXTRA) STATE =====================//
+#define CONF_MAGIC 888777
+struct ConfSymState
+{
+   string   name;
+   int      atrHandle, fastEMAHandle, slowEMAHandle, h4FastEMAHandle, h4SlowEMAHandle, rsiHandle;
+   double   pipFactor;
+   datetime lastBarTime, lastTradeCloseOrOpenTime;
+   int      todayTradeCount, lastTradeDay, consecutiveLosses;
+   bool     isActive;
+};
+ConfSymState extraSym[];
+int          extraSymbolCount = 0;
 
 //+------------------------------------------------------------------+
 //| INITIALIZATION                                                   |
@@ -135,6 +157,8 @@ int OnInit()
    Print("Swing: H1 lookback=", SwingLookbackBars, " confirm=+-", SwingConfirmBars, " bars");
    Print("========================================");
 
+   ParseExtraSymbolList();   // [multi-symbol] build the extra-symbol engine (no-op when disabled/empty)
+
    return INIT_SUCCEEDED;
 }
 
@@ -149,6 +173,15 @@ void OnDeinit(const int reason)
    if(H4FastEMAHandle != INVALID_HANDLE) IndicatorRelease(H4FastEMAHandle);
    if(H4SlowEMAHandle != INVALID_HANDLE) IndicatorRelease(H4SlowEMAHandle);
    if(RSIHandle       != INVALID_HANDLE) IndicatorRelease(RSIHandle);
+   for(int i = 0; i < extraSymbolCount; i++)   // [multi-symbol] release extra-symbol handles
+   {
+      if(extraSym[i].atrHandle       != INVALID_HANDLE) IndicatorRelease(extraSym[i].atrHandle);
+      if(extraSym[i].fastEMAHandle   != INVALID_HANDLE) IndicatorRelease(extraSym[i].fastEMAHandle);
+      if(extraSym[i].slowEMAHandle   != INVALID_HANDLE) IndicatorRelease(extraSym[i].slowEMAHandle);
+      if(extraSym[i].h4FastEMAHandle != INVALID_HANDLE) IndicatorRelease(extraSym[i].h4FastEMAHandle);
+      if(extraSym[i].h4SlowEMAHandle != INVALID_HANDLE) IndicatorRelease(extraSym[i].h4SlowEMAHandle);
+      if(extraSym[i].rsiHandle       != INVALID_HANDLE) IndicatorRelease(extraSym[i].rsiHandle);
+   }
    ObjectsDeleteAll(0, "SwingLine_");
    ObjectsDeleteAll(0, DPFX);
    Comment("");
@@ -258,8 +291,7 @@ void CheckFridayClose()
          ulong ticket = PositionGetTicket(i);
          if(ticket > 0 && PositionSelectByTicket(ticket))
          {
-            if(PositionGetString(POSITION_SYMBOL) == _Symbol &&
-               PositionGetInteger(POSITION_MAGIC) == 888777)
+            if(PositionGetInteger(POSITION_MAGIC) == CONF_MAGIC)  // all magic positions (chart + extras)
             {
                trade.PositionClose(ticket);
                Print("Friday close: ticket ", ticket);
@@ -279,27 +311,30 @@ void ApplyTrailingStop()
    {
       ulong ticket = PositionGetTicket(i);
       if(ticket == 0 || !PositionSelectByTicket(ticket)) continue;
-      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
-      if(PositionGetInteger(POSITION_MAGIC) != 888777) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != CONF_MAGIC) continue;
+      string posSym = PositionGetString(POSITION_SYMBOL);
+      double pt = SymbolInfoDouble(posSym, SYMBOL_POINT);
+      int    dg = (int)SymbolInfoInteger(posSym, SYMBOL_DIGITS);
+      double pf = PipFactorFor(posSym);
 
       ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
       double currentPrice = type == POSITION_TYPE_BUY ?
-                           SymbolInfoDouble(_Symbol, SYMBOL_BID) :
-                           SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+                           SymbolInfoDouble(posSym, SYMBOL_BID) :
+                           SymbolInfoDouble(posSym, SYMBOL_ASK);
       double openPrice  = PositionGetDouble(POSITION_PRICE_OPEN);
       double currentSL  = PositionGetDouble(POSITION_SL);
       double currentTP  = PositionGetDouble(POSITION_TP);
 
       double profitPips = type == POSITION_TYPE_BUY ?
-                         (currentPrice - openPrice) / _Point / 10 :
-                         (openPrice - currentPrice) / _Point / 10;
+                         (currentPrice - openPrice) / pt / pf :
+                         (openPrice - currentPrice) / pt / pf;
 
       if(profitPips >= TrailingStartPips)
       {
          double newSL = type == POSITION_TYPE_BUY ?
-                       currentPrice - TrailingStepPips * 10 * _Point :
-                       currentPrice + TrailingStepPips * 10 * _Point;
-         newSL = NormalizeDouble(newSL, _Digits);
+                       currentPrice - TrailingStepPips * pf * pt :
+                       currentPrice + TrailingStepPips * pf * pt;
+         newSL = NormalizeDouble(newSL, dg);
 
          if((type == POSITION_TYPE_BUY  && newSL > currentSL) ||
             (type == POSITION_TYPE_SELL && newSL < currentSL))
@@ -321,27 +356,30 @@ void ApplyBreakeven()
    {
       ulong ticket = PositionGetTicket(i);
       if(ticket == 0 || !PositionSelectByTicket(ticket)) continue;
-      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
-      if(PositionGetInteger(POSITION_MAGIC) != 888777) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != CONF_MAGIC) continue;
+      string posSym = PositionGetString(POSITION_SYMBOL);
+      double pt = SymbolInfoDouble(posSym, SYMBOL_POINT);
+      int    dg = (int)SymbolInfoInteger(posSym, SYMBOL_DIGITS);
+      double pf = PipFactorFor(posSym);
 
       ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
       double openPrice    = PositionGetDouble(POSITION_PRICE_OPEN);
       double currentSL    = PositionGetDouble(POSITION_SL);
       double currentTP    = PositionGetDouble(POSITION_TP);
       double currentPrice = type == POSITION_TYPE_BUY ?
-                           SymbolInfoDouble(_Symbol, SYMBOL_BID) :
-                           SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+                           SymbolInfoDouble(posSym, SYMBOL_BID) :
+                           SymbolInfoDouble(posSym, SYMBOL_ASK);
 
       double profitPips = type == POSITION_TYPE_BUY ?
-                         (currentPrice - openPrice) / _Point / 10 :
-                         (openPrice - currentPrice) / _Point / 10;
+                         (currentPrice - openPrice) / pt / pf :
+                         (openPrice - currentPrice) / pt / pf;
 
       if(profitPips >= BreakevenTriggerPips)
       {
          double beSL = type == POSITION_TYPE_BUY ?
-                      openPrice + 1 * _Point :
-                      openPrice - 1 * _Point;
-         beSL = NormalizeDouble(beSL, _Digits);
+                      openPrice + 1 * pt :
+                      openPrice - 1 * pt;
+         beSL = NormalizeDouble(beSL, dg);
 
          if((type == POSITION_TYPE_BUY  && beSL > currentSL) ||
             (type == POSITION_TYPE_SELL && beSL < currentSL))
@@ -364,8 +402,10 @@ void ApplyPartialClose()
    {
       ulong ticket = PositionGetTicket(i);
       if(ticket == 0 || !PositionSelectByTicket(ticket)) continue;
-      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
-      if(PositionGetInteger(POSITION_MAGIC) != 888777) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != CONF_MAGIC) continue;
+      string posSym = PositionGetString(POSITION_SYMBOL);
+      double pt = SymbolInfoDouble(posSym, SYMBOL_POINT);
+      double pf = PipFactorFor(posSym);
 
       string pcKey = "CONF_PC_" + IntegerToString(ticket);
       if(GlobalVariableCheck(pcKey)) continue;
@@ -373,18 +413,18 @@ void ApplyPartialClose()
       ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
       double openPrice    = PositionGetDouble(POSITION_PRICE_OPEN);
       double currentPrice = type == POSITION_TYPE_BUY ?
-                           SymbolInfoDouble(_Symbol, SYMBOL_BID) :
-                           SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+                           SymbolInfoDouble(posSym, SYMBOL_BID) :
+                           SymbolInfoDouble(posSym, SYMBOL_ASK);
 
       double profitPips = type == POSITION_TYPE_BUY ?
-                         (currentPrice - openPrice) / _Point / 10 :
-                         (openPrice - currentPrice) / _Point / 10;
+                         (currentPrice - openPrice) / pt / pf :
+                         (openPrice - currentPrice) / pt / pf;
 
       if(profitPips >= PartialClosePips)
       {
          double volume    = PositionGetDouble(POSITION_VOLUME);
-         double minLot    = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-         double lotStep   = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+         double minLot    = SymbolInfoDouble(posSym, SYMBOL_VOLUME_MIN);
+         double lotStep   = SymbolInfoDouble(posSym, SYMBOL_VOLUME_STEP);
          double closeVol  = NormalizeDouble(volume * PartialClosePercent / 100.0, 2);
          closeVol         = MathMax(minLot, MathFloor(closeVol / lotStep) * lotStep);
 
@@ -1177,35 +1217,47 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
 {
    if(trans.type != TRADE_TRANSACTION_DEAL_ADD) return;
    if(!HistoryDealSelect(trans.deal)) return;
-   if(HistoryDealGetInteger(trans.deal, DEAL_MAGIC) != 888777) return;
-   if(HistoryDealGetString(trans.deal, DEAL_SYMBOL) != _Symbol) return;
+   if(HistoryDealGetInteger(trans.deal, DEAL_MAGIC) != CONF_MAGIC) return;
    if((ENUM_DEAL_ENTRY)HistoryDealGetInteger(trans.deal, DEAL_ENTRY) != DEAL_ENTRY_OUT) return;
 
+   string dealSym    = HistoryDealGetString(trans.deal, DEAL_SYMBOL);
    double dealProfit = HistoryDealGetDouble(trans.deal, DEAL_PROFIT);
-   if(dealProfit < 0)
-      consecutiveLosses++;
-   else
-      consecutiveLosses = 0;
 
-   Print("Trade closed | Profit: ", DoubleToString(dealProfit, 2),
-         " | Consecutive losses: ", consecutiveLosses);
+   // [multi-symbol] Route the close to the chart symbol or the matching extra slot.
+   int xidx = (dealSym == _Symbol) ? -1 : FindConfSymIndex(dealSym);
+   if(dealSym != _Symbol && xidx < 0) return;  // not a symbol this EA manages
 
-   LastTradeCloseOrOpenTime = TimeCurrent();
+   if(xidx < 0)   // chart symbol — unchanged behavior
+   {
+      if(dealProfit < 0) consecutiveLosses++; else consecutiveLosses = 0;
+      Print("Trade closed | Profit: ", DoubleToString(dealProfit, 2),
+            " | Consecutive losses: ", consecutiveLosses);
+      LastTradeCloseOrOpenTime = TimeCurrent();
+   }
+   else           // extra symbol
+   {
+      if(dealProfit < 0) extraSym[xidx].consecutiveLosses++; else extraSym[xidx].consecutiveLosses = 0;
+      extraSym[xidx].lastTradeCloseOrOpenTime = TimeCurrent();
+      if(ExtraDebugLog)
+         Print("[", dealSym, "] EXTRA closed | Profit: ", DoubleToString(dealProfit, 2),
+               " | Consecutive losses: ", extraSym[xidx].consecutiveLosses);
+   }
 
-   // Batch reset: when all positions close, restart the cycle
+   // Batch reset: when all positions for THIS symbol close, restart its cycle
    int remaining = 0;
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
       ulong tk = PositionGetTicket(i);
       if(tk > 0 && PositionSelectByTicket(tk))
-         if(PositionGetString(POSITION_SYMBOL) == _Symbol &&
-            PositionGetInteger(POSITION_MAGIC) == 888777)
+         if(PositionGetString(POSITION_SYMBOL) == dealSym &&
+            PositionGetInteger(POSITION_MAGIC) == CONF_MAGIC)
             remaining++;
    }
    if(remaining == 0)
    {
-      TodayTradeCount = 0;
-      Print("All positions closed — batch reset 0/", MaxOpenPositions);
+      if(xidx < 0) TodayTradeCount = 0;
+      else         extraSym[xidx].todayTradeCount = 0;
+      Print(dealSym, ": all positions closed — batch reset 0/", MaxOpenPositions);
    }
 
    // Clean up the partial-close marker for this ticket so GlobalVariables don't accumulate forever
@@ -1262,6 +1314,338 @@ void OnChartEvent(const int id, const long &lparam,
    }
 }
 
+//+==================================================================+
+//| [MULTI-SYMBOL] EXTRA-SYMBOL ENGINE                              |
+//| Additive parallel engine: trades extra symbols from one chart   |
+//| attachment alongside the chart symbol. The chart-symbol path is  |
+//| left untouched; extras run the same confluence logic against     |
+//| per-symbol indicator handles and never draw on the chart.        |
+//+==================================================================+
+
+// Per-symbol pip factor (Confluence's chart path hardcodes /10 for 5/3-digit FX)
+double PipFactorFor(string sym)
+{
+   int d = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
+   if(d == 5 || d == 3) return 10.0;
+   if(d == 2)           return 100.0;
+   return 1.0;
+}
+
+// Account-wide daily loss cap: sums realized losses across ALL symbols this EA's
+// magic number closed today. Fixes the multiplicative-risk bug where N symbols
+// could each lose up to MaxDailyLossPercent of the whole account independently.
+bool IsAccountDailyLossLimitHit()
+{
+   if(MaxDailyLossPercent <= 0) return false;
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+   dt.hour = 0; dt.min = 0; dt.sec = 0;
+   datetime todayStart = StructToTime(dt);
+   double lossAcct = 0;
+   if(HistorySelect(todayStart, TimeCurrent()))
+      for(int i = HistoryDealsTotal() - 1; i >= 0; i--)
+      {
+         ulong deal = HistoryDealGetTicket(i);
+         if(deal == 0) continue;
+         if(HistoryDealGetInteger(deal, DEAL_MAGIC) != CONF_MAGIC) continue;
+         if((ENUM_DEAL_ENTRY)HistoryDealGetInteger(deal, DEAL_ENTRY) != DEAL_ENTRY_OUT) continue;
+         double profit = HistoryDealGetDouble(deal, DEAL_PROFIT);
+         if(profit < 0) lossAcct += MathAbs(profit);
+      }
+   return lossAcct >= AccountInfoDouble(ACCOUNT_BALANCE) * MaxDailyLossPercent / 100.0;
+}
+
+int FindConfSymIndex(string sym)
+{
+   for(int i = 0; i < extraSymbolCount; i++) if(extraSym[i].name == sym) return i;
+   return -1;
+}
+
+// Generic EMA trend (fast vs slow). Works for H1 or H4 via the handle pair.
+int GetEMATrend(int fastH, int slowH)
+{
+   double fast[1], slow[1];
+   if(CopyBuffer(fastH, 0, 1, 1, fast) != 1) return 0;
+   if(CopyBuffer(slowH, 0, 1, 1, slow) != 1) return 0;
+   if(fast[0] > slow[0]) return 1;
+   if(fast[0] < slow[0]) return -1;
+   return 0;
+}
+
+int GetCandleDirFor(string sym)
+{
+   MqlRates rates[2];
+   if(CopyRates(sym, PERIOD_M1, 0, 2, rates) != 2) return 0;
+   if(rates[0].close > rates[0].open) return 1;
+   if(rates[0].close < rates[0].open) return -1;
+   return 0;
+}
+
+double GetATRPointsFor(int atrH, double pt)
+{
+   double atr[1];
+   if(atrH != INVALID_HANDLE && CopyBuffer(atrH, 0, 1, 1, atr) == 1) return atr[0] / pt;
+   return 20;
+}
+
+double GetRSIFor(int rsiH)
+{
+   double rsi[1];
+   if(rsiH != INVALID_HANDLE && CopyBuffer(rsiH, 0, 1, 1, rsi) == 1) return rsi[0];
+   return 50;
+}
+
+// Nearest-swing SL anchor for an extra symbol (mirrors FindNearestSwing, no drawing).
+void FindNearestSwingFor(string sym, bool isBuy, double &swingPrice)
+{
+   swingPrice = 0;
+   MqlRates h1[]; ArraySetAsSeries(h1, true);
+   int h1Need = SwingLookbackBars + SwingConfirmBars + 5;
+   if(CopyRates(sym, PERIOD_H1, 0, h1Need, h1) >= SwingLookbackBars)
+   {
+      for(int i = SwingConfirmBars; i < SwingLookbackBars - SwingConfirmBars; i++)
+      {
+         bool ok = true;
+         for(int j = i - SwingConfirmBars; j <= i + SwingConfirmBars; j++)
+         {
+            if(j == i || j < 0) continue;
+            if(isBuy) { if(h1[j].low  <= h1[i].low)  { ok = false; break; } }
+            else      { if(h1[j].high >= h1[i].high) { ok = false; break; } }
+         }
+         if(ok) { swingPrice = isBuy ? h1[i].low : h1[i].high; return; }
+      }
+   }
+   MqlRates m15[]; ArraySetAsSeries(m15, true);
+   int m15Lookback = 150, m15Confirm = 4;
+   if(CopyRates(sym, PERIOD_M15, 0, m15Lookback + m15Confirm + 5, m15) >= m15Lookback)
+   {
+      for(int i = m15Confirm; i < m15Lookback - m15Confirm; i++)
+      {
+         bool ok = true;
+         for(int j = i - m15Confirm; j <= i + m15Confirm; j++)
+         {
+            if(j == i || j < 0) continue;
+            if(isBuy) { if(m15[j].low  <= m15[i].low)  { ok = false; break; } }
+            else      { if(m15[j].high >= m15[i].high) { ok = false; break; } }
+         }
+         if(ok) { swingPrice = isBuy ? m15[i].low : m15[i].high; return; }
+      }
+   }
+   swingPrice = 0;
+}
+
+double CalculateStopLossExtra(string sym, ConfSymState &st, bool isBuy, double entry)
+{
+   double pt = SymbolInfoDouble(sym, SYMBOL_POINT);
+   double swingPrice = 0;
+   FindNearestSwingFor(sym, isBuy, swingPrice);
+   double buffer = SLBufferPips * st.pipFactor * pt;
+   if(swingPrice > 0)
+   {
+      double sl = isBuy ? swingPrice - buffer : swingPrice + buffer;
+      if(isBuy  && sl >= entry) swingPrice = 0;
+      if(!isBuy && sl <= entry) swingPrice = 0;
+      if(swingPrice > 0)
+      {
+         if(MaxSLPips > 0)
+         {
+            double maxDist = MaxSLPips * st.pipFactor * pt;
+            if(MathAbs(entry - sl) > maxDist) sl = isBuy ? entry - maxDist : entry + maxDist;
+         }
+         return sl;
+      }
+   }
+   double atrValue   = GetATRPointsFor(st.atrHandle, pt) * pt;
+   double fallbackSL = isBuy ? entry - atrValue * 1.5 : entry + atrValue * 1.5;
+   if(MaxSLPips > 0)
+   {
+      double maxDist_ = MaxSLPips * st.pipFactor * pt;
+      if(MathAbs(entry - fallbackSL) > maxDist_) fallbackSL = isBuy ? entry - maxDist_ : entry + maxDist_;
+   }
+   return fallbackSL;
+}
+
+double CalculateLotSizeExtra(double slPoints, string sym, double riskPct)
+{
+   double minLot  = SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN);
+   double maxLot  = SymbolInfoDouble(sym, SYMBOL_VOLUME_MAX);
+   double lotStep = SymbolInfoDouble(sym, SYMBOL_VOLUME_STEP);
+   double pt      = SymbolInfoDouble(sym, SYMBOL_POINT);
+   if(FixedLot > 0)
+   {
+      double lot = MathMax(minLot, MathMin(maxLot, FixedLot));
+      return NormalizeDouble(MathFloor(lot / lotStep) * lotStep, 2);
+   }
+   double tickValue = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_VALUE);
+   double tickSize  = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_SIZE);
+   double balance   = AccountInfoDouble(ACCOUNT_BALANCE);
+   double riskMoney = balance * riskPct / 100.0;
+   if(tickValue <= 0 || tickSize <= 0 || riskMoney <= 0) return minLot;
+   double lossPerLot = (slPoints * pt / tickSize) * tickValue;
+   if(lossPerLot <= 0) return minLot;
+   double volume = riskMoney / lossPerLot;
+   volume = MathMax(minLot, MathMin(maxLot, volume));
+   volume = MathFloor(volume / lotStep) * lotStep;
+   volume = NormalizeDouble(volume, 2);
+   if(volume < minLot) volume = minLot;
+   if(MaxLotSize > 0 && volume > MaxLotSize) volume = MaxLotSize;
+   return volume;
+}
+
+// Full entry evaluation + order for an extra symbol (mirrors PlaceTrade's normal
+// mode). Fresh local CTrade per call; no ForceTrades, no chart drawing.
+void PlaceTradeExtra(string sym, ConfSymState &st)
+{
+   MqlTick tick;
+   if(!SymbolInfoTick(sym, tick)) return;
+   double pt = SymbolInfoDouble(sym, SYMBOL_POINT);
+   int    dg = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
+
+   int h1Trend = GetEMATrend(st.fastEMAHandle, st.slowEMAHandle);
+   int h4Trend = GetEMATrend(st.h4FastEMAHandle, st.h4SlowEMAHandle);
+   int candle  = GetCandleDirFor(sym);
+   if(h1Trend == 0) return;
+   if(UseH4Filter && h4Trend != 0 && h4Trend != h1Trend) return;
+
+   bool isBuy  = (h1Trend == 1  && candle == 1);
+   bool isSell = (h1Trend == -1 && candle == -1);
+   if(!isBuy && !isSell) return;
+
+   double entry = isBuy ? tick.ask : tick.bid;
+
+   // ATR volatility gate
+   if(UseATRFilter)
+   { double a = GetATRPointsFor(st.atrHandle, pt); if(a < ATRMinPoints || a > ATRMaxPoints) return; }
+   // RSI gate
+   if(UseRSIFilter)
+   { double rsi = GetRSIFor(st.rsiHandle);
+     if(isBuy  && rsi >= RSIOverbought) return;
+     if(!isBuy && rsi <= RSIOversold)   return; }
+   // Pullback gate (price near 50 EMA)
+   if(UsePullbackFilter)
+   { double fast[1];
+     if(CopyBuffer(st.fastEMAHandle, 0, 1, 1, fast) == 1)
+     { double maxDist = PullbackATRMultiplier * GetATRPointsFor(st.atrHandle, pt) * pt;
+       if(isBuy  && (entry - fast[0]) > maxDist) return;
+       if(!isBuy && (fast[0] - entry) > maxDist) return; } }
+
+   double sl = CalculateStopLossExtra(sym, st, isBuy, entry);
+   double tp = CalculateTakeProfit(isBuy, entry, sl);
+   sl = NormalizeDouble(sl, dg);
+   tp = NormalizeDouble(tp, dg);
+
+   double slPoints = MathAbs(entry - sl) / pt;
+   if(MinStopDistance > 0 && slPoints < MinStopDistance) return;
+   int minStop = (int)SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL);
+   if(slPoints < minStop) return;
+
+   double riskPct = (ExtraRiskPercent > 0) ? ExtraRiskPercent : RiskPercent;
+   double volume  = CalculateLotSizeExtra(slPoints, sym, riskPct);
+   if(volume <= 0) return;
+
+   CTrade xtrade;
+   xtrade.SetExpertMagicNumber(CONF_MAGIC);
+   xtrade.SetDeviationInPoints(30);
+   xtrade.SetTypeFillingBySymbol(sym);
+   bool result = isBuy ?
+                xtrade.Buy(volume, sym, entry, sl, tp, "CONFLUENCE BUY (" + sym + ")") :
+                xtrade.Sell(volume, sym, entry, sl, tp, "CONFLUENCE SELL (" + sym + ")");
+   if(result)
+   {
+      st.todayTradeCount++;
+      st.lastTradeCloseOrOpenTime = TimeCurrent();
+      Print("EXTRA TRADE ", sym, ": ", isBuy ? "BUY" : "SELL",
+            " | Entry ", DoubleToString(entry, dg), " SL ", DoubleToString(sl, dg),
+            " TP ", DoubleToString(tp, dg), " Vol ", DoubleToString(volume, 2));
+   }
+   else if(ExtraDebugLog)
+      Print("[", sym, "] EXTRA trade failed: ", xtrade.ResultRetcodeDescription());
+}
+
+// Build extraSym[] from the CSV. Skips blanks, the chart symbol, and duplicates.
+void ParseExtraSymbolList()
+{
+   extraSymbolCount = 0;
+   if(!ExtraSymbolsEnabled) return;
+   string raw = ExtraTradeSymbols;
+   StringTrimLeft(raw); StringTrimRight(raw);
+   if(StringLen(raw) == 0) return;
+   string parts[];
+   int n = StringSplit(raw, ',', parts);
+   if(n <= 0) return;
+   ArrayResize(extraSym, n);
+   for(int i = 0; i < n; i++)
+   {
+      string s = parts[i];
+      StringTrimLeft(s); StringTrimRight(s);
+      if(StringLen(s) == 0) continue;
+      if(s == _Symbol) continue;
+      if(FindConfSymIndex(s) >= 0) continue;
+      if(!SymbolSelect(s, true)) { Print("[", s, "] EXTRA: SymbolSelect failed — skipped"); continue; }
+      int idx = extraSymbolCount;
+      ConfSymState st;
+      st.name             = s;
+      st.atrHandle        = iATR(s, PERIOD_M15, 14);
+      st.fastEMAHandle    = iMA(s, PERIOD_H1, 50,  0, MODE_EMA, PRICE_CLOSE);
+      st.slowEMAHandle    = iMA(s, PERIOD_H1, 200, 0, MODE_EMA, PRICE_CLOSE);
+      st.h4FastEMAHandle  = iMA(s, PERIOD_H4, 50,  0, MODE_EMA, PRICE_CLOSE);
+      st.h4SlowEMAHandle  = iMA(s, PERIOD_H4, 200, 0, MODE_EMA, PRICE_CLOSE);
+      st.rsiHandle        = iRSI(s, PERIOD_H1, RSIPeriod, PRICE_CLOSE);
+      st.isActive = (st.atrHandle != INVALID_HANDLE && st.fastEMAHandle != INVALID_HANDLE &&
+                     st.slowEMAHandle != INVALID_HANDLE && st.h4FastEMAHandle != INVALID_HANDLE &&
+                     st.h4SlowEMAHandle != INVALID_HANDLE && st.rsiHandle != INVALID_HANDLE);
+      if(!st.isActive) Print("[", s, "] EXTRA: indicator handle failed — symbol skipped");
+      st.pipFactor = PipFactorFor(s);
+      st.lastBarTime = 0; st.lastTradeCloseOrOpenTime = 0;
+      st.todayTradeCount = 0; st.lastTradeDay = 0; st.consecutiveLosses = 0;
+      extraSym[idx] = st;
+      extraSymbolCount++;
+   }
+   Print("EXTRA ENGINE: ", extraSymbolCount, " symbol(s) active out of ", n, " requested");
+}
+
+// Per-symbol tick driver — mirrors OnTick's chart-symbol gating, per symbol.
+// Account-wide loss cap is checked once in OnTick before this runs.
+void ProcessExtraSymbol(int idx)
+{
+   if(idx < 0 || idx >= extraSymbolCount) return;
+   if(!extraSym[idx].isActive) return;
+   string sym = extraSym[idx].name;
+
+   MqlDateTime dnow; TimeToStruct(TimeCurrent(), dnow);
+   if(dnow.day != extraSym[idx].lastTradeDay)
+   { extraSym[idx].todayTradeCount = 0; extraSym[idx].consecutiveLosses = 0; extraSym[idx].lastTradeDay = dnow.day; }
+
+   int symCap = (ExtraMaxTradesPerDay > 0) ? ExtraMaxTradesPerDay : MaxTradesPerDay;
+   if(extraSym[idx].todayTradeCount >= symCap) return;
+   if(extraSym[idx].consecutiveLosses >= MaxConsecutiveLosses) return;
+
+   // Per-symbol spread gate
+   if(MaxSpreadPoints > 0)
+   { double pt = SymbolInfoDouble(sym, SYMBOL_POINT);
+     if((SymbolInfoDouble(sym, SYMBOL_ASK) - SymbolInfoDouble(sym, SYMBOL_BID)) / pt > MaxSpreadPoints) return; }
+
+   // Per-symbol open-position cap
+   int openCount = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   { ulong tk = PositionGetTicket(i);
+     if(tk > 0 && PositionSelectByTicket(tk))
+       if(PositionGetString(POSITION_SYMBOL) == sym && PositionGetInteger(POSITION_MAGIC) == CONF_MAGIC) openCount++; }
+   if(openCount >= MaxOpenPositions) return;
+
+   if(!IsTradingTime()) return;
+   if(PostTradeCooldownMin > 0 && extraSym[idx].lastTradeCloseOrOpenTime > 0 &&
+      TimeCurrent() - extraSym[idx].lastTradeCloseOrOpenTime < (datetime)(PostTradeCooldownMin * 60)) return;
+
+   datetime barTime[1];
+   if(CopyTime(sym, PERIOD_M1, 0, 1, barTime) != 1) return;
+   if(barTime[0] != extraSym[idx].lastBarTime)
+   {
+      extraSym[idx].lastBarTime = barTime[0];
+      PlaceTradeExtra(sym, extraSym[idx]);
+   }
+}
+
 //+------------------------------------------------------------------+
 //| MAIN TICK                                                        |
 //+------------------------------------------------------------------+
@@ -1275,6 +1659,13 @@ void OnTick()
    ApplyTrailingStop();
    ApplyPartialClose();
 
+   // [multi-symbol] Account-wide daily loss cap shared by chart symbol + all extras.
+   bool accountDailyLossHit = IsAccountDailyLossLimitHit();
+   // Drive the extra-symbol engine BEFORE the chart-symbol early returns below, so
+   // extras still trade when the chart symbol's own gates bail out this tick.
+   if(ExtraSymbolsEnabled && extraSymbolCount > 0 && !accountDailyLossHit)
+      for(int i = 0; i < extraSymbolCount; i++) ProcessExtraSymbol(i);
+
    if(ForceTrades)
    {
       static datetime lastForce = 0;
@@ -1287,6 +1678,7 @@ void OnTick()
       return;
    }
 
+   if(accountDailyLossHit) return;
    if(!CanTrade())      return;
    if(!IsTradingTime()) return;
    if(PostTradeCooldownMin > 0 && LastTradeCloseOrOpenTime > 0 &&
