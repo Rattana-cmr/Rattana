@@ -1706,7 +1706,7 @@ bool CheckTwinsSequence(bool &isBuy)
    { if(newBar){RejKZ();rejSeqLastBar=curBar;} lastFailedStep=7;lastFailedStepDesc="Killzone";return false; }
    if(!htfLevelReached||!mssConfirmed||!bosConfirmed||!liquiditySweepDone||
       fvgCount1Min<0||lastSwingHighH1<=0||lastSwingLowH1<=0)
-   { DebugPrint("Entry: context not ready"); return false; }
+   { if(newBar){DebugPrint("Entry: context not ready");rejSeqLastBar=curBar;} return false; }  // [fix] was printing every tick, not once per bar -> multi-GB logs
 
    double curPrice=SymbolInfoDouble(_Symbol,SYMBOL_BID);
    double range=lastSwingHighH1-lastSwingLowH1;
