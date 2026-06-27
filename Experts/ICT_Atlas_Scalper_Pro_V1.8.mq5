@@ -256,6 +256,13 @@ input bool   DebugMode             = false;
 input bool   EnableEntryReport     = false; // [V1.7] Print per-bar ENTRY REJECTED detail to journal
 input bool   RelaxedMode           = false;
 
+input group "========== MULTI-SYMBOL (EXTRA) =========="
+input string ExtraTradeSymbols     = "GBPUSD,EURUSD,XAGUSD"; // CSV list of extra symbols to trade alongside the chart symbol. Empty = unchanged single-symbol behavior
+input bool   ExtraSymbolsEnabled   = true;   // Master kill-switch for the extra-symbol engine
+input double ExtraRiskPercent      = 0.0;    // Risk % per trade for extra symbols. 0 = reuse chart symbol's effRiskPct
+input int    ExtraMaxTradesPerDay  = 0;      // Per-extra-symbol daily trade cap. 0 = auto-derive from MaxTradesPerDay
+input bool   ExtraDebugLog         = false;  // Print debug info for the extra-symbol engine
+
 //===================================================================//
 //  GLOBALS
 //===================================================================//
@@ -455,6 +462,32 @@ string MSSMarkerNames[]; int MSSMarkerIdx=0;   // [V1.8] structure markers
 string BOSMarkerNames[]; int BOSMarkerIdx=0;   // [V1.8]
 string LiqMarkerNames[]; int LiqMarkerIdx=0;   // [V1.8]
 string SMTMarkerNames[]; int SMTMarkerIdx=0;   // [V1.8]
+
+//===================================================================//
+//  MULTI-SYMBOL (EXTRA) STATE
+//===================================================================//
+struct ExtraSymState
+{
+   string   name;
+   int      atrHandle, atrHandleH1, fastEMAHandle, slowEMAHandle, h4EMAHandle;
+   double   pipFactor;
+   datetime lastBarTime, lastTradeCloseTime;
+   bool     htfLevelReached;
+   bool     mssConfirmed, mssIsBullish;
+   bool     bosConfirmed, bosIsBullish;
+   bool     liquiditySweepDone, sweepIsBullish;
+   bool     cisd5MinConfirmed, cisd5MinIsBearish; datetime lastCISDTime5Min;
+   bool     cisd1MinConfirmed, cisd1MinIsBearish; datetime lastCISDTime1Min;
+   int      fvgCount1Min;
+   double   lastSwingHighH1, lastSwingLowH1, lastSwingHighM15, lastSwingLowM15;
+   int      lastTradeScore, lastFailedStep; string lastFailedStepDesc;
+   int      todayTradeCount, lastTradeDay, consecutiveLosses;
+   bool     isActive;
+};
+ExtraSymState extraSym[];
+string        extraSymbolList[];
+int           extraSymbolCount = 0;
+ulong         lastProcessedDeal = 0;   // [V1.8 multi-symbol] OnTrade() watermark, replaces single-ticket guard
 
 //===================================================================//
 //  PRESET / OPT MODE
@@ -710,9 +743,9 @@ bool IsTradingTime()
   return(InSydneySession()||InTokyoSession()||InLondonSession()||
          InNewYorkSession()||InLondonNYOverlap()||InTokyoLondonOverlap()); }
 
-bool IsSpreadOK()
-{ if(MaxSpreadPoints<=0) return true;
-  return((SymbolInfoDouble(_Symbol,SYMBOL_ASK)-SymbolInfoDouble(_Symbol,SYMBOL_BID))/_Point<=MaxSpreadPoints); }
+bool IsSpreadOK(string sym=NULL)
+{ if(sym==NULL) sym=_Symbol; if(MaxSpreadPoints<=0) return true;
+  return((SymbolInfoDouble(sym,SYMBOL_ASK)-SymbolInfoDouble(sym,SYMBOL_BID))/SymbolInfoDouble(sym,SYMBOL_POINT)<=MaxSpreadPoints); }
 
 double GetATR()
 { double a[1]; if(CopyBuffer(ATRHandle,0,1,1,a)==1) return a[0]; return _Point*100; }
@@ -722,28 +755,34 @@ double GetATRH1()
 { double a[1]; if(ATRHandleH1!=INVALID_HANDLE&&CopyBuffer(ATRHandleH1,0,1,1,a)==1) return a[0];
   return GetATR()*4; }
 
-bool IsPositionOpen()
-{ for(int i=PositionsTotal()-1;i>=0;i--)
+// [V1.8 multi-symbol] Handle-bound ATR read, generalizes GetATR()/GetATRH1() for any symbol's handle
+double GetATRFor(int handle,double pointSize)
+{ double a[1]; if(handle!=INVALID_HANDLE&&CopyBuffer(handle,0,1,1,a)==1) return a[0]; return pointSize*100; }
+
+bool IsPositionOpen(string sym=NULL)
+{ if(sym==NULL) sym=_Symbol;
+  for(int i=PositionsTotal()-1;i>=0;i--)
   { ulong t=PositionGetTicket(i); if(t>0&&PositionSelectByTicket(t))
-    if(PositionGetString(POSITION_SYMBOL)==_Symbol&&PositionGetInteger(POSITION_MAGIC)==MAGIC_NUMBER) return true; }
+    if(PositionGetString(POSITION_SYMBOL)==sym&&PositionGetInteger(POSITION_MAGIC)==MAGIC_NUMBER) return true; }
   return false; }
 
 //===================================================================//
 //  HTF LEVEL
 //===================================================================//
-bool HasReachedHTFLevel()
-{ if(!HTFLevelRequired) return true;
+bool HasReachedHTFLevel(string sym=NULL,int atrHandle=INVALID_HANDLE)
+{ if(sym==NULL) sym=_Symbol; if(atrHandle==INVALID_HANDLE) atrHandle=ATRHandle;
+  if(!HTFLevelRequired) return true;
   ENUM_TIMEFRAMES htf; switch(HTFLevelMinutes){case 15:htf=PERIOD_M15;break;case 30:htf=PERIOD_M30;break;default:htf=PERIOD_H1;}
-  double price=iClose(_Symbol,htf,0), tol=GetATR()*HTFToleranceATRMulti;
-  for(int i=1;i<=20;i++){double hi1=iHigh(_Symbol,htf,i),lo1=iLow(_Symbol,htf,i),hi3=iHigh(_Symbol,htf,i+2),lo3=iLow(_Symbol,htf,i+2);
+  double price=iClose(sym,htf,0), tol=GetATRFor(atrHandle,SymbolInfoDouble(sym,SYMBOL_POINT))*HTFToleranceATRMulti;
+  for(int i=1;i<=20;i++){double hi1=iHigh(sym,htf,i),lo1=iLow(sym,htf,i),hi3=iHigh(sym,htf,i+2),lo3=iLow(sym,htf,i+2);
     if(hi1<lo3&&price>=hi1-tol&&price<=lo3+tol) return true; if(lo1>hi3&&price>=hi3-tol&&price<=lo1+tol) return true;}
-  double ph=iHigh(_Symbol,htf,1),pl=iLow(_Symbol,htf,1);
+  double ph=iHigh(sym,htf,1),pl=iLow(sym,htf,1);
   if(MathAbs(price-ph)<=tol||MathAbs(price-pl)<=tol) return true;
-  double h1H=iHigh(_Symbol,PERIOD_H1,1),h1L=iLow(_Symbol,PERIOD_H1,1);
+  double h1H=iHigh(sym,PERIOD_H1,1),h1L=iLow(sym,PERIOD_H1,1);
   if(MathAbs(price-h1H)<=tol*2||MathAbs(price-h1L)<=tol*2) return true;
-  double h4H=iHigh(_Symbol,PERIOD_H4,1),h4L=iLow(_Symbol,PERIOD_H4,1);
+  double h4H=iHigh(sym,PERIOD_H4,1),h4L=iLow(sym,PERIOD_H4,1);
   if(MathAbs(price-h4H)<=tol*4||MathAbs(price-h4L)<=tol*4) return true;
-  double dH=iHigh(_Symbol,PERIOD_D1,1),dL=iLow(_Symbol,PERIOD_D1,1),dT=tol*3;
+  double dH=iHigh(sym,PERIOD_D1,1),dL=iLow(sym,PERIOD_D1,1),dT=tol*3;
   if(MathAbs(price-dH)<=dT||MathAbs(price-dL)<=dT) return true; return false; }
 
 //===================================================================//
@@ -751,12 +790,13 @@ bool HasReachedHTFLevel()
 //  Uses effMSSConfirm (2 for SmartActive vs 3 for Conservative)
 //  Checks current forming bar + displacement candles
 //===================================================================//
-bool DetectMSS(bool &isBullish,datetime &pivotTime,double &pivotPrice)
+bool DetectMSS(bool &isBullish,datetime &pivotTime,double &pivotPrice,string sym=NULL,int atrHandle=INVALID_HANDLE)
 {
+   if(sym==NULL) sym=_Symbol; if(atrHandle==INVALID_HANDLE) atrHandle=ATRHandle;
    int conf=effMSSConfirm;
    int need=MSSLookbackBars+conf*2+5;
    MqlRates h1[]; ArraySetAsSeries(h1,true);
-   if(CopyRates(_Symbol,PERIOD_H1,0,need,h1)<need) return false;
+   if(CopyRates(sym,PERIOD_H1,0,need,h1)<need) return false;
 
    double swHigh=0,swLow=0;
    int    swHBar=INT_MAX,swLBar=INT_MAX;
@@ -773,7 +813,7 @@ bool DetectMSS(bool &isBullish,datetime &pivotTime,double &pivotPrice)
    }
    if(swHBar==INT_MAX||swLBar==INT_MAX) return false;
 
-   double atr=GetATR();
+   double atr=GetATRFor(atrHandle,SymbolInfoDouble(sym,SYMBOL_POINT));
    // Check current forming bar AND last closed bar (wider window = more signals)
    for(int i=0;i<=1;i++)
    {
@@ -797,12 +837,13 @@ bool DetectMSS(bool &isBullish,datetime &pivotTime,double &pivotPrice)
 //  V1.3 IMPROVED BOS DETECTION
 //  Uses effBOSConf; checks current bar + displacement
 //===================================================================//
-bool DetectBOS(bool &isBullish,datetime &pivotTime,double &pivotPrice)
+bool DetectBOS(bool &isBullish,datetime &pivotTime,double &pivotPrice,string sym=NULL,int atrHandle=INVALID_HANDLE)
 {
+   if(sym==NULL) sym=_Symbol; if(atrHandle==INVALID_HANDLE) atrHandle=ATRHandle;
    int conf=effBOSConf;
    int need=BOSLookbackBars+conf*2+5;
    MqlRates m15[]; ArraySetAsSeries(m15,true);
-   if(CopyRates(_Symbol,PERIOD_M15,0,need,m15)<need) return false;
+   if(CopyRates(sym,PERIOD_M15,0,need,m15)<need) return false;
 
    double swHigh=0,swLow=0;
    int    swHBar=INT_MAX,swLBar=INT_MAX;
@@ -819,7 +860,7 @@ bool DetectBOS(bool &isBullish,datetime &pivotTime,double &pivotPrice)
    }
    if(swHBar==INT_MAX||swLBar==INT_MAX) return false;  // [fix] need both pivots to order which one is being broken
 
-   double atr=GetATR();
+   double atr=GetATRFor(atrHandle,SymbolInfoDouble(sym,SYMBOL_POINT));
    for(int i=0;i<=1;i++)
    { double body=MathAbs(m15[i].close-m15[i].open); bool bull=m15[i].close>m15[i].open;
      if(bull&&body>atr*0.3&&swLBar<swHBar&&m15[i].close>swHigh){ isBullish=true;  pivotTime=m15[swHBar].time; pivotPrice=swHigh; return true; }
@@ -835,14 +876,15 @@ bool DetectBOS(bool &isBullish,datetime &pivotTime,double &pivotPrice)
 //===================================================================//
 //  LIQUIDITY SWEEP
 //===================================================================//
-bool DetectLiquiditySweep(bool &sweepBullish)
+bool DetectLiquiditySweep(bool &sweepBullish,string sym=NULL,double pipFactor=0)
 {
+   if(sym==NULL) sym=_Symbol; if(pipFactor<=0) pipFactor=PipFactor;
    // [V1.6] Swing-based liquidity pools: find swing high/low, check wick-through + close back
    // Old code just used range max/min which is NOT a real liquidity sweep
    int need=LiquidityLookbackBars+5;
    MqlRates m15[]; ArraySetAsSeries(m15,true);
-   if(CopyRates(_Symbol,PERIOD_M15,0,need,m15)<need) return false;
-   double wickPts=LiquidityWickPips*PipFactor*_Point;
+   if(CopyRates(sym,PERIOD_M15,0,need,m15)<need) return false;
+   double wickPts=LiquidityWickPips*pipFactor*SymbolInfoDouble(sym,SYMBOL_POINT);
    int conf=2;
    double poolHigh=0,poolLow=0;
    for(int i=conf;i<LiquidityLookbackBars-conf;i++)
@@ -1015,23 +1057,24 @@ void DetectSwingStructure()
 //===================================================================//
 //  V1.3 IMPROVED 5M CISD — uses effBodyThresh
 //===================================================================//
-bool IsCISD5M(bool &isBearish)
+bool IsCISD5M(bool &isBearish,string sym=NULL)
 {
+   if(sym==NULL) sym=_Symbol;
    bool allUp=true,allDown=true;
    for(int i=1;i<=2;i++)
-   { double c=iClose(_Symbol,PERIOD_M5,i),o=iOpen(_Symbol,PERIOD_M5,i);
+   { double c=iClose(sym,PERIOD_M5,i),o=iOpen(sym,PERIOD_M5,i);
      if(c<=o) allUp=false; if(c>=o) allDown=false; }
-   double curC=iClose(_Symbol,PERIOD_M5,0);
-   if(allUp){ double sl=iLow(_Symbol,PERIOD_M5,1);
-     for(int i=2;i<=2;i++){double l=iLow(_Symbol,PERIOD_M5,i);if(l<sl)sl=l;}
+   double curC=iClose(sym,PERIOD_M5,0);
+   if(allUp){ double sl=iLow(sym,PERIOD_M5,1);
+     for(int i=2;i<=2;i++){double l=iLow(sym,PERIOD_M5,i);if(l<sl)sl=l;}
      if(curC<sl){isBearish=true;return true;} }
-   if(allDown){ double sh=iHigh(_Symbol,PERIOD_M5,1);
-     for(int i=2;i<=2;i++){double h=iHigh(_Symbol,PERIOD_M5,i);if(h>sh)sh=h;}
+   if(allDown){ double sh=iHigh(sym,PERIOD_M5,1);
+     for(int i=2;i<=2;i++){double h=iHigh(sym,PERIOD_M5,i);if(h>sh)sh=h;}
      if(curC>sh){isBearish=false;return true;} }
    // Momentum candle — use effBodyThresh (0.60 for SmartActive vs 0.70 before)
    for(int lb=1;lb<=10;lb++)
-   { double o=iOpen(_Symbol,PERIOD_M5,lb),cl=iClose(_Symbol,PERIOD_M5,lb);
-     double h=iHigh(_Symbol,PERIOD_M5,lb),l=iLow(_Symbol,PERIOD_M5,lb);
+   { double o=iOpen(sym,PERIOD_M5,lb),cl=iClose(sym,PERIOD_M5,lb);
+     double h=iHigh(sym,PERIOD_M5,lb),l=iLow(sym,PERIOD_M5,lb);
      double rng=h-l; if(rng>0&&MathAbs(cl-o)/rng>=effBodyThresh){isBearish=(cl<o);return true;} }
    return false;
 }
@@ -1042,38 +1085,39 @@ bool IsCISD5M(bool &isBearish)
 //  + 3-bar momentum
 //  + effBodyThresh adaptive threshold
 //===================================================================//
-bool IsCISD1M(bool &isBearish)
+bool IsCISD1M(bool &isBearish,string sym=NULL)
 {
+   if(sym==NULL) sym=_Symbol;
    // Method 1: classic CISD reversal
    bool allUp=true,allDown=true;
-   double c=iClose(_Symbol,PERIOD_M1,1),o=iOpen(_Symbol,PERIOD_M1,1);
+   double c=iClose(sym,PERIOD_M1,1),o=iOpen(sym,PERIOD_M1,1);
    if(c<=o) allUp=false; if(c>=o) allDown=false;
-   double curC=iClose(_Symbol,PERIOD_M1,0);
-   if(allUp  &&curC<iLow (_Symbol,PERIOD_M1,1)){isBearish=true; return true;}
-   if(allDown&&curC>iHigh(_Symbol,PERIOD_M1,1)){isBearish=false;return true;}
+   double curC=iClose(sym,PERIOD_M1,0);
+   if(allUp  &&curC<iLow (sym,PERIOD_M1,1)){isBearish=true; return true;}
+   if(allDown&&curC>iHigh(sym,PERIOD_M1,1)){isBearish=false;return true;}
 
    // Method 2: momentum candle — adaptive threshold
    for(int lb=1;lb<=3;lb++)
-   { double o1=iOpen(_Symbol,PERIOD_M1,lb),c1=iClose(_Symbol,PERIOD_M1,lb);
-     double h1=iHigh(_Symbol,PERIOD_M1,lb),l1=iLow(_Symbol,PERIOD_M1,lb);
+   { double o1=iOpen(sym,PERIOD_M1,lb),c1=iClose(sym,PERIOD_M1,lb);
+     double h1=iHigh(sym,PERIOD_M1,lb),l1=iLow(sym,PERIOD_M1,lb);
      double rng=h1-l1; if(rng>0&&MathAbs(c1-o1)/rng>=effBodyThresh){isBearish=(c1<o1);return true;} }
 
    // Method 3: pin bar — wick >= 2x body, closes in opposite half [V1.6]
    for(int lb=1;lb<=3;lb++)
-   { double o1=iOpen(_Symbol,PERIOD_M1,lb),c1=iClose(_Symbol,PERIOD_M1,lb);
-     double h1=iHigh(_Symbol,PERIOD_M1,lb),l1=iLow(_Symbol,PERIOD_M1,lb);
+   { double o1=iOpen(sym,PERIOD_M1,lb),c1=iClose(sym,PERIOD_M1,lb);
+     double h1=iHigh(sym,PERIOD_M1,lb),l1=iLow(sym,PERIOD_M1,lb);
      double body=MathAbs(c1-o1);
      double upWick=h1-MathMax(c1,o1), dnWick=MathMin(c1,o1)-l1;
      if(body>0&&upWick>=2.0*body&&c1<(h1+l1)/2.0){isBearish=true; return true;}  // shooting star
      if(body>0&&dnWick>=2.0*body&&c1>(h1+l1)/2.0){isBearish=false;return true;} } // hammer
 
    // Method 4: 3-bar momentum [V1.6]
-   bool m4bull=(iClose(_Symbol,PERIOD_M1,1)>iOpen(_Symbol,PERIOD_M1,1)&&
-                iClose(_Symbol,PERIOD_M1,2)>iOpen(_Symbol,PERIOD_M1,2)&&
-                iClose(_Symbol,PERIOD_M1,3)>iOpen(_Symbol,PERIOD_M1,3));
-   bool m4bear=(iClose(_Symbol,PERIOD_M1,1)<iOpen(_Symbol,PERIOD_M1,1)&&
-                iClose(_Symbol,PERIOD_M1,2)<iOpen(_Symbol,PERIOD_M1,2)&&
-                iClose(_Symbol,PERIOD_M1,3)<iOpen(_Symbol,PERIOD_M1,3));
+   bool m4bull=(iClose(sym,PERIOD_M1,1)>iOpen(sym,PERIOD_M1,1)&&
+                iClose(sym,PERIOD_M1,2)>iOpen(sym,PERIOD_M1,2)&&
+                iClose(sym,PERIOD_M1,3)>iOpen(sym,PERIOD_M1,3));
+   bool m4bear=(iClose(sym,PERIOD_M1,1)<iOpen(sym,PERIOD_M1,1)&&
+                iClose(sym,PERIOD_M1,2)<iOpen(sym,PERIOD_M1,2)&&
+                iClose(sym,PERIOD_M1,3)<iOpen(sym,PERIOD_M1,3));
    if(m4bull){isBearish=false;return true;}
    if(m4bear){isBearish=true; return true;}
    return false;
@@ -1082,24 +1126,26 @@ bool IsCISD1M(bool &isBearish)
 //===================================================================//
 //  SWING DETECTION
 //===================================================================//
-void FindSwingPointsH1(double &swHigh,double &swLow)
-{ swHigh=0;swLow=0;
+void FindSwingPointsH1(double &swHigh,double &swLow,string sym=NULL,double pipFactor=0)
+{ if(sym==NULL) sym=_Symbol; if(pipFactor<=0) pipFactor=PipFactor;
+  swHigh=0;swLow=0;
   MqlRates h1[];ArraySetAsSeries(h1,true);
   int need=SwingLookbackBarsH1+SwingConfirmBarsH1+5;
-  if(CopyRates(_Symbol,PERIOD_H1,0,need,h1)<need) return;
-  double maxD=(MaxSwingDistancePips>0)?MaxSwingDistancePips*PipFactor*_Point:DBL_MAX;
-  double cur=iClose(_Symbol,PERIOD_H1,0); int bH=INT_MAX,bL=INT_MAX;
+  if(CopyRates(sym,PERIOD_H1,0,need,h1)<need) return;
+  double maxD=(MaxSwingDistancePips>0)?MaxSwingDistancePips*pipFactor*SymbolInfoDouble(sym,SYMBOL_POINT):DBL_MAX;
+  double cur=iClose(sym,PERIOD_H1,0); int bH=INT_MAX,bL=INT_MAX;
   for(int i=SwingConfirmBarsH1;i<SwingLookbackBarsH1-SwingConfirmBarsH1;i++)
   { if(MathAbs(h1[i].high-cur)<=maxD){bool ok=true;for(int j=i-SwingConfirmBarsH1;j<=i+SwingConfirmBarsH1;j++){if(j==i||j<0)continue;if(h1[j].high>=h1[i].high){ok=false;break;}}if(ok&&i<bH){swHigh=h1[i].high;bH=i;}}
     if(MathAbs(h1[i].low-cur)<=maxD){bool ok=true;for(int j=i-SwingConfirmBarsH1;j<=i+SwingConfirmBarsH1;j++){if(j==i||j<0)continue;if(h1[j].low<=h1[i].low){ok=false;break;}}if(ok&&i<bL){swLow=h1[i].low;bL=i;}}}}
 
-void FindSwingPointsM15(double &swHigh,double &swLow)
-{ swHigh=0;swLow=0;
+void FindSwingPointsM15(double &swHigh,double &swLow,string sym=NULL,double pipFactor=0)
+{ if(sym==NULL) sym=_Symbol; if(pipFactor<=0) pipFactor=PipFactor;
+  swHigh=0;swLow=0;
   MqlRates m15[];ArraySetAsSeries(m15,true);
   int need=SwingLookbackBarsM15+SwingConfirmBarsM15+5;
-  if(CopyRates(_Symbol,PERIOD_M15,0,need,m15)<need) return;
-  double maxD=(MaxSwingDistancePips>0)?MaxSwingDistancePips*PipFactor*_Point:DBL_MAX;
-  double cur=iClose(_Symbol,PERIOD_M15,0); int bH=INT_MAX,bL=INT_MAX;
+  if(CopyRates(sym,PERIOD_M15,0,need,m15)<need) return;
+  double maxD=(MaxSwingDistancePips>0)?MaxSwingDistancePips*pipFactor*SymbolInfoDouble(sym,SYMBOL_POINT):DBL_MAX;
+  double cur=iClose(sym,PERIOD_M15,0); int bH=INT_MAX,bL=INT_MAX;
   for(int i=SwingConfirmBarsM15;i<SwingLookbackBarsM15-SwingConfirmBarsM15;i++)
   { if(MathAbs(m15[i].high-cur)<=maxD){bool ok=true;for(int j=i-SwingConfirmBarsM15;j<=i+SwingConfirmBarsM15;j++){if(j==i||j<0)continue;if(m15[j].high>=m15[i].high){ok=false;break;}}if(ok&&i<bH){swHigh=m15[i].high;bH=i;}}
     if(MathAbs(m15[i].low-cur)<=maxD){bool ok=true;for(int j=i-SwingConfirmBarsM15;j<=i+SwingConfirmBarsM15;j++){if(j==i||j<0)continue;if(m15[j].low<=m15[i].low){ok=false;break;}}if(ok&&i<bL){swLow=m15[i].low;bL=i;}}}}
@@ -1113,11 +1159,12 @@ void FindSwingPointsM15(double &swHigh,double &swLow)
 //  standalone so SL placement can anchor on it even when BOS isn't //
 //  the active entry trigger.                                       //
 //===================================================================//
-bool FindStrongSwing(bool isBuy,double &swPrice)
+bool FindStrongSwing(bool isBuy,double &swPrice,string sym=NULL)
 {
+   if(sym==NULL) sym=_Symbol;
    int need=BOSLookbackBars+5;
    MqlRates m15[]; ArraySetAsSeries(m15,true);
-   if(CopyRates(_Symbol,PERIOD_M15,0,need,m15)<need) return false;
+   if(CopyRates(sym,PERIOD_M15,0,need,m15)<need) return false;
 
    double swHigh=0,swLow=0; int swHBar=INT_MAX,swLBar=INT_MAX; int conf=3;
    for(int i=conf;i<BOSLookbackBars-conf;i++)
@@ -1148,6 +1195,17 @@ void FindNearestSwing(bool isBuy,double &swPrice)
   if(swPrice<=0){ double atr=GetATR();
     swPrice=isBuy?SymbolInfoDouble(_Symbol,SYMBOL_BID)-atr*1.5:SymbolInfoDouble(_Symbol,SYMBOL_ASK)+atr*1.5; }
   if(ShowSwingLines) DrawSwingLine(swPrice,isBuy,"M15"); }
+
+// [V1.8 multi-symbol] Extra-symbol twin of FindNearestSwing — writes through out params
+// instead of chart-symbol globals, and never draws (Category C stays chart-symbol only)
+void FindNearestSwingFor(string sym,double pipFactor,int atrHandle,bool isBuy,double &swHighM15,double &swLowM15,double &swPrice)
+{ swPrice=0;
+  if(FindStrongSwing(isBuy,swPrice,sym)) return;
+  FindSwingPointsM15(swHighM15,swLowM15,sym,pipFactor);
+  if(isBuy&&swLowM15>0)   swPrice=swLowM15;
+  if(!isBuy&&swHighM15>0) swPrice=swHighM15;
+  if(swPrice<=0){ double atr=GetATRFor(atrHandle,SymbolInfoDouble(sym,SYMBOL_POINT));
+    swPrice=isBuy?SymbolInfoDouble(sym,SYMBOL_BID)-atr*1.5:SymbolInfoDouble(sym,SYMBOL_ASK)+atr*1.5; } }
 
 //===================================================================//
 //  [V1.8] ORDER BLOCKS — the last opposite-colour M15 candle before  //
@@ -1277,10 +1335,11 @@ bool IsPriceInOrderBlock(bool isBuy) { if(!UseOrderBlockFilter) return true; ret
 //===================================================================//
 //  FVG / OTE / SMT / NEWS / TREND
 //===================================================================//
-int CountFVGsOn1Min(datetime startTime,datetime endTime)
-{ int count=0; MqlRates rates[];ArraySetAsSeries(rates,false);
+int CountFVGsOn1Min(datetime startTime,datetime endTime,string sym=NULL)
+{ if(sym==NULL) sym=_Symbol;
+  int count=0; MqlRates rates[];ArraySetAsSeries(rates,false);
   datetime from=startTime-PeriodSeconds(PERIOD_M1)*5;
-  int copied=CopyRates(_Symbol,PERIOD_M1,from,endTime+PeriodSeconds(PERIOD_M1),rates);
+  int copied=CopyRates(sym,PERIOD_M1,from,endTime+PeriodSeconds(PERIOD_M1),rates);
   if(copied<3) return 0;
   for(int i=0;i<copied-2;i++)
   { if(rates[i].time<startTime||rates[i].time>endTime) continue;
@@ -1471,15 +1530,16 @@ bool IsNewsTime()
     if(ev.importance==CALENDAR_IMPORTANCE_HIGH){newsBlocked=true;return true;} }
   newsBlocked=false; return false; }
 
-bool IsTrendAligned(bool isBuy)
-{ MqlRates d1[4]; bool d1Up=false,d1Dn=false;
-  if(CopyRates(_Symbol,PERIOD_D1,0,4,d1)==4)
+bool IsTrendAligned(bool isBuy,string sym=NULL,int h4EMAHandle=INVALID_HANDLE)
+{ if(sym==NULL) sym=_Symbol; if(h4EMAHandle==INVALID_HANDLE) h4EMAHandle=H4EMAHandle;
+  MqlRates d1[4]; bool d1Up=false,d1Dn=false;
+  if(CopyRates(sym,PERIOD_D1,0,4,d1)==4)
   { int bull=0,bear=0; for(int di=1;di<=3;di++){if(d1[di].close>d1[di].open)bull++;else bear++;}
     d1Up=isBuy?(bull==3):(bull>=2); d1Dn=isBuy?(bear>=2):(bear==3); }
   double h4e[1]; bool h4Up=false,h4Dn=false;
   // [V1.6] Use cached H4EMAHandle — was creating+releasing a new handle every tick
-  if(H4EMAHandle!=INVALID_HANDLE&&CopyBuffer(H4EMAHandle,0,1,1,h4e)==1)
-  { double bid=SymbolInfoDouble(_Symbol,SYMBOL_BID); h4Up=(bid>h4e[0]); h4Dn=(bid<h4e[0]); }
+  if(h4EMAHandle!=INVALID_HANDLE&&CopyBuffer(h4EMAHandle,0,1,1,h4e)==1)
+  { double bid=SymbolInfoDouble(sym,SYMBOL_BID); h4Up=(bid>h4e[0]); h4Dn=(bid<h4e[0]); }
   if(isBuy){bool anyBull=d1Up||h4Up;bool strongBear=d1Dn&&h4Dn;if(strongBear||(!anyBull&&d1Dn))return false;}
   else     {bool anyBear=d1Dn||h4Dn;bool strongBull=d1Up&&h4Up;if(strongBull||(!anyBear&&d1Up))return false;}
   return true; }
@@ -1497,15 +1557,17 @@ int CalculateTradeScore(bool isBuy)
   if(IsPriceNearFVGZone(isBuy))    s+=5;  // [V1.8]
   return MathMin(s,100); }
 
-bool IsBrokerOrderSafe(bool isBuy,double entry,double sl,double tp,string &reason)
-{ if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED)){reason="TERMINAL DISABLED";return false;}
+bool IsBrokerOrderSafe(bool isBuy,double entry,double sl,double tp,string &reason,string sym=NULL)
+{ if(sym==NULL) sym=_Symbol;
+  if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED)){reason="TERMINAL DISABLED";return false;}
   if(!MQLInfoInteger(MQL_TRADE_ALLOWED)){reason="EA DISABLED";return false;}
   if(!AccountInfoInteger(ACCOUNT_TRADE_ALLOWED)){reason="ACCOUNT DISABLED";return false;}
-  long mode=SymbolInfoInteger(_Symbol,SYMBOL_TRADE_MODE);
+  long mode=SymbolInfoInteger(sym,SYMBOL_TRADE_MODE);
   if(mode==SYMBOL_TRADE_MODE_DISABLED){reason="SYMBOL DISABLED";return false;}
   if(mode==SYMBOL_TRADE_MODE_CLOSEONLY){reason="CLOSE ONLY";return false;}
-  double sl2=SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL)*_Point;
-  double fl =SymbolInfoInteger(_Symbol,SYMBOL_TRADE_FREEZE_LEVEL)*_Point;
+  double pt=SymbolInfoDouble(sym,SYMBOL_POINT);
+  double sl2=SymbolInfoInteger(sym,SYMBOL_TRADE_STOPS_LEVEL)*pt;
+  double fl =SymbolInfoInteger(sym,SYMBOL_TRADE_FREEZE_LEVEL)*pt;
   if(MathAbs(entry-sl)<sl2){reason="SL INSIDE STOP LEVEL";return false;}
   if(MathAbs(entry-tp)<sl2){reason="TP INSIDE STOP LEVEL";return false;}
   if(fl>0&&MathAbs(entry-tp)<fl){reason="TP INSIDE FREEZE";return false;}
@@ -1677,19 +1739,20 @@ int GetAIScoreBonus(bool isBuy)
 //  [V1.6] DEALING RANGE CHECK — buy in discount, sell in premium
 //  Uses last 6 H4 bars (~24h) to define the institutional dealing range
 //===================================================================//
-bool CheckDealingRange(bool isBuy)
+bool CheckDealingRange(bool isBuy,string sym=NULL)
 {
+   if(sym==NULL) sym=_Symbol;
    if(!UseDealingRange) return true;
    double rangeHigh=0, rangeLow=0;
    for(int i=1;i<=6;i++)
    {
-      double h=iHigh(_Symbol,PERIOD_H4,i), l=iLow(_Symbol,PERIOD_H4,i);
+      double h=iHigh(sym,PERIOD_H4,i), l=iLow(sym,PERIOD_H4,i);
       if(rangeHigh==0||h>rangeHigh) rangeHigh=h;
       if(rangeLow==0 ||l<rangeLow)  rangeLow=l;
    }
    if(rangeHigh<=rangeLow) return true;
    double eq=(rangeHigh+rangeLow)/2.0;
-   double price=SymbolInfoDouble(_Symbol,SYMBOL_BID);
+   double price=SymbolInfoDouble(sym,SYMBOL_BID);
    return isBuy ? (price<=eq) : (price>=eq);
 }
 
@@ -1775,6 +1838,137 @@ bool CheckTwinsSequence(bool &isBuy)
 }
 
 //===================================================================//
+//  [V1.8 MULTI-SYMBOL] EXTRA-SYMBOL ENGINE — parallel twins of
+//  UpdateContextState() / CalculateTradeScore() / CheckTwinsSequence().
+//  Same core Twin Model logic against ExtraSymState fields instead of
+//  the chart-symbol globals. No drawing calls, no Rej* stat counters,
+//  no AI/Order Block/FVG-zone/SMT/News checks — those filters are all
+//  OFF in the validated baseline, so skipping them is exact parity
+//  with what already runs for the chart symbol today.
+//===================================================================//
+void UpdateContextStateExtra(string sym,ExtraSymState &st)
+{
+   if(HasReachedHTFLevel(sym,st.atrHandle))
+   { if(!st.htfLevelReached){st.htfLevelReached=true;st.lastFailedStep=0;st.lastFailedStepDesc="";
+       if(ExtraDebugLog) Print("[",sym,"] STEP 1 PASS: HTF Level");} }
+   else{ st.htfLevelReached=false; st.lastFailedStep=1;st.lastFailedStepDesc="HTF Level";return; }
+
+   if(effUseMSSFilter)
+   { bool mssB=false; datetime mssPivotT=0; double mssPivotP=0;
+     if(DetectMSS(mssB,mssPivotT,mssPivotP,sym,st.atrHandle))
+     { if(!st.mssConfirmed||st.mssIsBullish!=mssB)
+       { st.mssConfirmed=true;st.mssIsBullish=mssB;st.cisd5MinConfirmed=true;st.cisd5MinIsBearish=!mssB;
+         st.cisd1MinConfirmed=false;st.fvgCount1Min=-1;
+         if(ExtraDebugLog) Print("[",sym,"] STEP 2 PASS: MSS ",(mssB?"BULL":"BEAR")); } }
+     else if(!st.mssConfirmed)
+     { st.lastFailedStep=2;st.lastFailedStepDesc="MSS (H1)";return; } }
+   else
+   { bool tb=false; bool found=IsCISD5M(tb,sym);
+     if(!found){ for(int lb=1;lb<=10;lb++){double o5=iOpen(sym,PERIOD_M5,lb),cl5=iClose(sym,PERIOD_M5,lb);
+       double h5=iHigh(sym,PERIOD_M5,lb),l5=iLow(sym,PERIOD_M5,lb),rng5=h5-l5;
+       if(rng5>0&&MathAbs(cl5-o5)/rng5>=effBodyThresh){tb=(cl5<o5);found=true;break;}}}
+     if(found){ datetime bt5=iTime(sym,PERIOD_M5,0);
+       if(st.lastCISDTime5Min!=bt5){st.lastCISDTime5Min=bt5;st.cisd5MinConfirmed=true;st.cisd5MinIsBearish=tb;
+         st.mssConfirmed=true;st.mssIsBullish=!tb;st.cisd1MinConfirmed=false;st.fvgCount1Min=-1;
+         if(ExtraDebugLog) Print("[",sym,"] STEP 2 PASS: 5M CISD ",(tb?"BEAR":"BULL"));}}
+     if(!st.mssConfirmed){st.lastFailedStep=2;st.lastFailedStepDesc="5M Direction";return;} }
+
+   if(effUseBOSFilter)
+   { bool bosB=false; datetime bosPivotT=0; double bosPivotP=0;
+     if(DetectBOS(bosB,bosPivotT,bosPivotP,sym,st.atrHandle))
+     { if(!st.bosConfirmed||st.bosIsBullish!=bosB){st.bosConfirmed=true;st.bosIsBullish=bosB;
+         if(ExtraDebugLog) Print("[",sym,"] STEP 3 PASS: BOS ",(bosB?"BULL":"BEAR"));} }
+     else if(!st.bosConfirmed)
+     { st.lastFailedStep=3;st.lastFailedStepDesc="BOS (M15)";return; } }
+   else st.bosConfirmed=true;
+
+   if(effRequireLiqSweep)
+   { bool swpB=false;
+     if(DetectLiquiditySweep(swpB,sym,st.pipFactor)){ if(!st.liquiditySweepDone){st.liquiditySweepDone=true;st.sweepIsBullish=swpB;
+         if(ExtraDebugLog) Print("[",sym,"] STEP 4 PASS: Sweep");} }
+     else if(!st.liquiditySweepDone){ st.lastFailedStep=4;st.lastFailedStepDesc="Liquidity Sweep";return; } }
+   else st.liquiditySweepDone=true;
+
+   if(st.fvgCount1Min<0)
+   { datetime cStart=st.lastCISDTime5Min-PeriodSeconds(PERIOD_M5),cEnd=st.lastCISDTime5Min;
+     if(cEnd<=0){datetime b5[1];if(CopyTime(sym,PERIOD_M5,1,1,b5)==1){cEnd=b5[0];cStart=b5[0]-PeriodSeconds(PERIOD_M5);}}
+     st.fvgCount1Min=CountFVGsOn1Min(cStart,cEnd,sym); }
+   int fvgReq=GetEffectiveFVGReq();
+   if(fvgReq>0&&st.fvgCount1Min<fvgReq){ st.lastFailedStep=5;st.lastFailedStepDesc="1M FVG Count";return; }
+
+   FindSwingPointsH1(st.lastSwingHighH1,st.lastSwingLowH1,sym,st.pipFactor);
+   if(st.lastSwingHighH1<=0||st.lastSwingLowH1<=0||st.lastSwingHighH1<=st.lastSwingLowH1)
+   { st.lastFailedStep=6;st.lastFailedStepDesc="H1 Swings";return; }
+
+   if(effUseATRRange)
+   { double rangeActual=st.lastSwingHighH1-st.lastSwingLowH1, h1atr=GetATRFor(st.atrHandleH1,SymbolInfoDouble(sym,SYMBOL_POINT));
+     if(h1atr>0&&rangeActual<h1atr*effMinRangeATR)
+     { st.lastFailedStep=6;st.lastFailedStepDesc="H1 Range (ATR)";return; } }
+   else if(effUseH1RangeFilter&&effMinH1Range>0)
+   { double rp=(st.lastSwingHighH1-st.lastSwingLowH1)/SymbolInfoDouble(sym,SYMBOL_POINT)/st.pipFactor;
+     if(rp<effMinH1Range){ st.lastFailedStep=6;st.lastFailedStepDesc="H1 Range (pips)";return; } }
+
+   FindSwingPointsM15(st.lastSwingHighM15,st.lastSwingLowM15,sym,st.pipFactor);
+}
+
+int CalculateTradeScoreExtra(string sym,bool isBuy,const ExtraSymState &st)
+{ int s=0;
+  if(effUseMSSFilter && st.mssConfirmed)          s+=20;
+  if(effUseBOSFilter && st.bosConfirmed)          s+=20;
+  if(effRequireLiqSweep && st.liquiditySweepDone) s+=20;
+  int fvgR=GetEffectiveFVGReq();
+  if(fvgR==0) s+=5; else if(st.fvgCount1Min>=0&&st.fvgCount1Min>=fvgR) s+=15;
+  s+=15; if(IsTrendAligned(isBuy,sym,st.h4EMAHandle)) s+=10;
+  // AI / Order Block / FVG-zone bonus terms omitted — those filters are off by default today
+  return MathMin(s,100); }
+
+bool CheckTwinsSequenceExtra(string sym,ExtraSymState &st,bool &isBuy)
+{
+   if(UseTimeFilter&&!IsTradingTime()) return false;
+   if(UseKillzoneFilter&&!InActiveKillzone()) return false;
+   if(!st.htfLevelReached||!st.mssConfirmed||!st.bosConfirmed||!st.liquiditySweepDone||
+      st.fvgCount1Min<0||st.lastSwingHighH1<=0||st.lastSwingLowH1<=0) return false;
+
+   double curPrice=SymbolInfoDouble(sym,SYMBOL_BID);
+   double range=st.lastSwingHighH1-st.lastSwingLowH1;
+   double oteLow =st.lastSwingLowH1+range*(RelaxedMode?effOTEMin-0.02:effOTEMin);
+   double oteHigh=st.lastSwingLowH1+range*(RelaxedMode?effOTEMax+0.02:effOTEMax);
+   if(curPrice<oteLow||curPrice>oteHigh)
+   { st.lastFailedStep=8;st.lastFailedStepDesc="OTE Zone";return false; }
+
+   bool tb1=false; bool found1=IsCISD1M(tb1,sym);
+   if(found1){ datetime bt1=iTime(sym,PERIOD_M1,0);
+     if(st.lastCISDTime1Min!=bt1){st.lastCISDTime1Min=bt1;st.cisd1MinConfirmed=true;st.cisd1MinIsBearish=tb1;} }
+   if(!st.cisd1MinConfirmed)
+   { st.lastFailedStep=9;st.lastFailedStepDesc="1M Entry Trigger";return false; }
+
+   double oteBottom=st.lastSwingLowH1+range*effOTEMin, oteTop=st.lastSwingLowH1+range*effOTEMax;
+   double oteRange=oteTop-oteBottom;
+   bool priceInBuy =(curPrice<=oteBottom+oteRange*0.35);
+   bool priceInSell=(curPrice>=oteTop  -oteRange*0.35);
+   if(!priceInBuy&&!priceInSell){ st.lastFailedStep=9;st.lastFailedStepDesc="OTE Middle";return false; }
+   isBuy=priceInBuy;
+
+   if(st.mssIsBullish!=isBuy)        { st.lastFailedStep=9;st.lastFailedStepDesc="MSS/OTE Conflict";return false; }
+   if(st.cisd1MinIsBearish==isBuy)   { st.lastFailedStep=9;st.lastFailedStepDesc="1M/OTE Conflict";return false; }
+
+   if(!CheckDealingRange(isBuy,sym))
+   { st.lastFailedStep=9;st.lastFailedStepDesc="Dealing Range";return false; }
+
+   // Order Block / FVG-zone hard filters, SMT, News, AI: skipped — off by default today
+   if(effUseDailyTrend&&!IsTrendAligned(isBuy,sym,st.h4EMAHandle))
+   { st.lastFailedStep=10;st.lastFailedStepDesc="MTF Trend";return false; }
+
+   int score=CalculateTradeScoreExtra(sym,isBuy,st); st.lastTradeScore=score;
+   if(UseTradeScore&&effMinScore>0&&score<effMinScore)
+   { st.lastFailedStep=10;st.lastFailedStepDesc="Score "+IntegerToString(score)+"/"+IntegerToString(effMinScore);return false; }
+
+   st.lastFailedStep=0;st.lastFailedStepDesc="";
+   if(ExtraDebugLog) Print("[",sym,"] >>> ENTRY READY: ",(isBuy?"BUY":"SELL")," Score=",score," <<<");
+   return true;
+}
+
+//===================================================================//
 //  DAILY COUNTERS
 //===================================================================//
 void UpdateDailyCounters()
@@ -1818,14 +2012,15 @@ bool CanTrade()
 //===================================================================//
 //  LOT SIZE
 //===================================================================//
-double CalculateLotSize(double slPoints)
-{ double minL=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN),maxL=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MAX),step=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);
+double CalculateLotSize(double slPoints,string sym=NULL,double riskPct=0)
+{ if(sym==NULL) sym=_Symbol; if(riskPct<=0) riskPct=effRiskPct;
+  double minL=SymbolInfoDouble(sym,SYMBOL_VOLUME_MIN),maxL=SymbolInfoDouble(sym,SYMBOL_VOLUME_MAX),step=SymbolInfoDouble(sym,SYMBOL_VOLUME_STEP);
   if(slPoints<=0) return minL;
   if(RiskMode==RISK_FIXED_LOT||FixedLot>0){ double lot=MathMax(minL,MathMin(MathMin(maxL,MaxLotLimit),FixedLot>0?FixedLot:0.01)); return NormalizeDouble(MathFloor(lot/step)*step,2); }
-  double tv=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_VALUE),ts=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE);
+  double tv=SymbolInfoDouble(sym,SYMBOL_TRADE_TICK_VALUE),ts=SymbolInfoDouble(sym,SYMBOL_TRADE_TICK_SIZE);
   if(tv<=0||ts<=0) return minL;
   double base=(RiskMode==RISK_DYNAMIC_EQ)?AccountInfoDouble(ACCOUNT_EQUITY):AccountInfoDouble(ACCOUNT_BALANCE);
-  double risk=base*effRiskPct/100.0, lpl=(slPoints*_Point/ts)*tv;
+  double risk=base*riskPct/100.0, lpl=(slPoints*SymbolInfoDouble(sym,SYMBOL_POINT)/ts)*tv;
   if(lpl<=0) return minL;
   double vol=MathMax(minL,MathMin(MathMin(maxL,MaxLotLimit),risk/lpl));
   return NormalizeDouble(MathFloor(vol/step)*step,2); }
@@ -1835,10 +2030,11 @@ double CalculateLotSize(double slPoints)
 //===================================================================//
 void PartialClosePosition(ulong ticket,double closeLots)
 { if(!PositionSelectByTicket(ticket)) return;
+  string posSym=PositionGetString(POSITION_SYMBOL);
   ENUM_POSITION_TYPE pt=(ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
-  double curP=pt==POSITION_TYPE_BUY?SymbolInfoDouble(_Symbol,SYMBOL_BID):SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+  double curP=pt==POSITION_TYPE_BUY?SymbolInfoDouble(posSym,SYMBOL_BID):SymbolInfoDouble(posSym,SYMBOL_ASK);
   MqlTradeRequest req={};MqlTradeResult res={};
-  req.action=TRADE_ACTION_DEAL;req.symbol=_Symbol;req.volume=NormalizeDouble(closeLots,2);
+  req.action=TRADE_ACTION_DEAL;req.symbol=posSym;req.volume=NormalizeDouble(closeLots,2);
   req.type=(pt==POSITION_TYPE_BUY)?ORDER_TYPE_SELL:ORDER_TYPE_BUY;req.price=curP;req.deviation=30;
   req.magic=MAGIC_NUMBER;req.position=ticket;req.comment="Atlas Scalper Pro Partial TP";
   if(!OrderSend(req,res)) Print("Partial close failed: ",res.retcode); }
@@ -1847,17 +2043,19 @@ void CheckPartialTP()
 { if(!UsePartialTP) return;
   for(int i=PositionsTotal()-1;i>=0;i--)
   { ulong tk=PositionGetTicket(i); if(!PositionSelectByTicket(tk)) continue;
-    if(PositionGetString(POSITION_SYMBOL)!=_Symbol||PositionGetInteger(POSITION_MAGIC)!=MAGIC_NUMBER) continue;
+    if(PositionGetInteger(POSITION_MAGIC)!=MAGIC_NUMBER) continue;
+    string posSym=PositionGetString(POSITION_SYMBOL);
+    double pt0=SymbolInfoDouble(posSym,SYMBOL_POINT); int dg=(int)SymbolInfoInteger(posSym,SYMBOL_DIGITS);
     string key="TWINS_PTL_"+IntegerToString(tk); if(GlobalVariableCheck(key)) continue;
     ENUM_POSITION_TYPE pt=(ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
     double entry=PositionGetDouble(POSITION_PRICE_OPEN),sl=PositionGetDouble(POSITION_SL),slD=MathAbs(entry-sl);
     if(slD<=0) continue;
-    double price=pt==POSITION_TYPE_BUY?SymbolInfoDouble(_Symbol,SYMBOL_BID):SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+    double price=pt==POSITION_TYPE_BUY?SymbolInfoDouble(posSym,SYMBOL_BID):SymbolInfoDouble(posSym,SYMBOL_ASK);
     if((pt==POSITION_TYPE_BUY?(price-entry):(entry-price))/slD<PartialCloseRR) continue;
     double vol=PositionGetDouble(POSITION_VOLUME),cv=NormalizeDouble(vol*PartialClosePercent/100.0,2);
-    double minL=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN); if(cv<minL) continue;
+    double minL=SymbolInfoDouble(posSym,SYMBOL_VOLUME_MIN); if(cv<minL) continue;
     GlobalVariableSet(key,1); PartialClosePosition(tk,cv);
-    double beSL=pt==POSITION_TYPE_BUY?NormalizeDouble(entry+2*_Point,_Digits):NormalizeDouble(entry-2*_Point,_Digits);
+    double beSL=pt==POSITION_TYPE_BUY?NormalizeDouble(entry+2*pt0,dg):NormalizeDouble(entry-2*pt0,dg);
     double cSL=PositionGetDouble(POSITION_SL),cTP=PositionGetDouble(POSITION_TP);
     bool mov=(pt==POSITION_TYPE_BUY&&(cSL==0||beSL>cSL))||(pt==POSITION_TYPE_SELL&&(cSL==0||beSL<cSL));
     if(mov) trade.PositionModify(tk,beSL,cTP); Print("PARTIAL TP: ",DoubleToString(cv,2),"lots | SL→BE"); }}
@@ -1929,13 +2127,15 @@ void UpdateMFEMAE()
 { for(int i=PositionsTotal()-1;i>=0;i--)
   { ulong tk=PositionGetTicket(i);
     if(tk==0||!PositionSelectByTicket(tk)) continue;
-    if(PositionGetString(POSITION_SYMBOL)!=_Symbol||PositionGetInteger(POSITION_MAGIC)!=MAGIC_NUMBER) continue;
+    if(PositionGetInteger(POSITION_MAGIC)!=MAGIC_NUMBER) continue;
+    string posSym=PositionGetString(POSITION_SYMBOL);
+    double pt0=SymbolInfoDouble(posSym,SYMBOL_POINT); double pf=PipFactorFor(posSym);
     ENUM_POSITION_TYPE pt=(ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
     double entry=PositionGetDouble(POSITION_PRICE_OPEN);
-    double price=(pt==POSITION_TYPE_BUY)?SymbolInfoDouble(_Symbol,SYMBOL_BID):SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+    double price=(pt==POSITION_TYPE_BUY)?SymbolInfoDouble(posSym,SYMBOL_BID):SymbolInfoDouble(posSym,SYMBOL_ASK);
     ulong posID=(ulong)PositionGetInteger(POSITION_IDENTIFIER);
-    double favPips=(pt==POSITION_TYPE_BUY)?(price-entry)/_Point/PipFactor:(entry-price)/_Point/PipFactor;
-    double advPips=(pt==POSITION_TYPE_BUY)?(entry-price)/_Point/PipFactor:(price-entry)/_Point/PipFactor;
+    double favPips=(pt==POSITION_TYPE_BUY)?(price-entry)/pt0/pf:(entry-price)/pt0/pf;
+    double advPips=(pt==POSITION_TYPE_BUY)?(entry-price)/pt0/pf:(price-entry)/pt0/pf;
     string mfeK="ICTSMC_MFE_"+IntegerToString(posID);
     string maeK="ICTSMC_MAE_"+IntegerToString(posID);
     if(!GlobalVariableCheck(mfeK)||favPips>GlobalVariableGet(mfeK)) GlobalVariableSet(mfeK,favPips);
@@ -2164,17 +2364,63 @@ void PlaceTrade(bool isBuy=true)
     TakeScreenshot(isBuy?"BUY_OPEN":"SELL_OPEN"); }
   else{Print("TRADE FAILED: ",trade.ResultRetcodeDescription());cisd1MinConfirmed=false;} }
 
+// [V1.8 MULTI-SYMBOL] Extra-symbol order placement — mirrors PlaceTrade()'s SL/TP math
+// but uses a fresh local CTrade (never the shared global `trade`), state on the
+// ExtraSymState struct, and no ML-context GlobalVariables / screenshots (only TWINS_RR_).
+void PlaceTradeExtra(string sym,ExtraSymState &st,bool isBuy)
+{ if(IsPositionOpen(sym)) return;
+  long tradeMode=SymbolInfoInteger(sym,SYMBOL_TRADE_MODE);
+  if(tradeMode==SYMBOL_TRADE_MODE_DISABLED||tradeMode==SYMBOL_TRADE_MODE_CLOSEONLY) return;
+  MqlTick tick; if(!SymbolInfoTick(sym,tick)) return;
+  double pt=SymbolInfoDouble(sym,SYMBOL_POINT); int dg=(int)SymbolInfoInteger(sym,SYMBOL_DIGITS);
+  double entry=isBuy?tick.ask:tick.bid;
+  double swHM15=st.lastSwingHighM15, swLM15=st.lastSwingLowM15, swingPrice=0;
+  FindNearestSwingFor(sym,st.pipFactor,st.atrHandle,isBuy,swHM15,swLM15,swingPrice);
+  st.lastSwingHighM15=swHM15; st.lastSwingLowM15=swLM15;
+  double buffer=SLBufferPips*st.pipFactor*pt;
+  double sl=isBuy?NormalizeDouble(swingPrice-buffer,dg):NormalizeDouble(swingPrice+buffer,dg);
+  if(isBuy&&sl>=entry){if(ExtraDebugLog)Print("[",sym,"] SKIP: SL>=entry");return;} if(!isBuy&&sl<=entry){if(ExtraDebugLog)Print("[",sym,"] SKIP: SL<=entry");return;}
+  double slPts=MathAbs(entry-sl)/pt; if(slPts<MinStopDistance){if(ExtraDebugLog)Print("[",sym,"] SKIP: SL too close");return;}
+  if(effMaxSLPips>0){double mx=effMaxSLPips*st.pipFactor; if(slPts>mx){double atrm=GetATRFor(st.atrHandle,pt);
+    sl=isBuy?NormalizeDouble(entry-atrm*1.5,dg):NormalizeDouble(entry+atrm*1.5,dg);slPts=MathAbs(entry-sl)/pt;}}
+  if(effMinSLPips>0){double slP=slPts/st.pipFactor; if(slP<(double)effMinSLPips){if(ExtraDebugLog)Print("[",sym,"] SKIP: SL too small ",DoubleToString(slP,1));st.cisd1MinConfirmed=false;return;}}
+  double atr=GetATRFor(st.atrHandle,pt);
+  double fixRR=isBuy?NormalizeDouble(entry+slPts*pt*RewardRiskRatio,dg):NormalizeDouble(entry-slPts*pt*RewardRiskRatio,dg);
+  double atrTP=isBuy?NormalizeDouble(entry+atr*ATRMultiplierTP,dg):NormalizeDouble(entry-atr*ATRMultiplierTP,dg);
+  double tp=fixRR; if(TPMode==TP_ATR) tp=atrTP; else if(TPMode==TP_HYBRID) tp=isBuy?MathMin(fixRR,atrTP):MathMax(fixRR,atrTP);
+  double rr=MathAbs(tp-entry)/MathAbs(entry-sl);
+  if(rr<MinRewardRiskRatio-0.001){if(ExtraDebugLog)Print("[",sym,"] SKIP: R:R=",DoubleToString(rr,3));st.cisd1MinConfirmed=false;return;}
+  if(isBuy&&tp<=entry){if(ExtraDebugLog)Print("[",sym,"] SKIP: TP below entry");return;} if(!isBuy&&tp>=entry){if(ExtraDebugLog)Print("[",sym,"] SKIP: TP above entry");return;}
+  string reason=""; if(!IsBrokerOrderSafe(isBuy,entry,sl,tp,reason,sym)){if(ExtraDebugLog)Print("[",sym,"] BROKER: ",reason);st.cisd1MinConfirmed=false;return;}
+  double riskPct=(ExtraRiskPercent>0)?ExtraRiskPercent:effRiskPct;
+  double volume=CalculateLotSize(slPts,sym,riskPct); if(volume<=0){if(ExtraDebugLog)Print("[",sym,"] SKIP: lot=0");return;}
+  CTrade xtrade; xtrade.SetExpertMagicNumber(MAGIC_NUMBER); xtrade.SetDeviationInPoints(30); xtrade.SetTypeFillingBySymbol(sym);
+  Print("══ ",EA_NAME," | EXTRA ",sym," | ",(isBuy?"BUY":"SELL")," | Score=",st.lastTradeScore," | R:R=",DoubleToString(rr,2));
+  bool result=isBuy?xtrade.Buy(volume,sym,entry,sl,tp,"Atlas Scalper Pro BUY ("+sym+")"):xtrade.Sell(volume,sym,entry,sl,tp,"Atlas Scalper Pro SELL ("+sym+")");
+  if(result)
+  { st.todayTradeCount++;
+    st.cisd5MinConfirmed=false;st.cisd1MinConfirmed=false;st.mssConfirmed=false;st.bosConfirmed=false;st.liquiditySweepDone=false;st.fvgCount1Min=-1;
+    ulong od=xtrade.ResultDeal();
+    if(od>0&&HistoryDealSelect(od)){ulong posID=(ulong)HistoryDealGetInteger(od,DEAL_POSITION_ID);
+      GlobalVariableSet("TWINS_RR_"+IntegerToString(posID),rr);} }
+  else{Print("[",sym,"] TRADE FAILED: ",xtrade.ResultRetcodeDescription());st.cisd1MinConfirmed=false;} }
+
+// [V1.8 multi-symbol] manages ALL magic-number positions (chart symbol + extras).
+// Price-distance math derives _Point/_Digits/PipFactor per position symbol so a
+// different symbol's position isn't corrupted by the chart symbol's scale.
 void ApplyTrailingStop()
 { if(!UseTrailingStop) return;
   for(int i=PositionsTotal()-1;i>=0;i--)
   { ulong tk=PositionGetTicket(i); if(tk==0||!PositionSelectByTicket(tk)) continue;
-    if(PositionGetString(POSITION_SYMBOL)!=_Symbol||PositionGetInteger(POSITION_MAGIC)!=MAGIC_NUMBER) continue;
+    if(PositionGetInteger(POSITION_MAGIC)!=MAGIC_NUMBER) continue;
+    string posSym=PositionGetString(POSITION_SYMBOL);
+    double pt=SymbolInfoDouble(posSym,SYMBOL_POINT); int dg=(int)SymbolInfoInteger(posSym,SYMBOL_DIGITS); double pf=PipFactorFor(posSym);
     ENUM_POSITION_TYPE tp2=(ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
     double op=PositionGetDouble(POSITION_PRICE_OPEN),cSL=PositionGetDouble(POSITION_SL),cTP=PositionGetDouble(POSITION_TP);
-    double price=tp2==POSITION_TYPE_BUY?SymbolInfoDouble(_Symbol,SYMBOL_BID):SymbolInfoDouble(_Symbol,SYMBOL_ASK);
-    double pp=tp2==POSITION_TYPE_BUY?(price-op)/_Point/PipFactor:(op-price)/_Point/PipFactor;
+    double price=tp2==POSITION_TYPE_BUY?SymbolInfoDouble(posSym,SYMBOL_BID):SymbolInfoDouble(posSym,SYMBOL_ASK);
+    double pp=tp2==POSITION_TYPE_BUY?(price-op)/pt/pf:(op-price)/pt/pf;
     if(pp<TrailingStartPips) continue;
-    double nSL=tp2==POSITION_TYPE_BUY?NormalizeDouble(price-TrailingStepPips*PipFactor*_Point,_Digits):NormalizeDouble(price+TrailingStepPips*PipFactor*_Point,_Digits);
+    double nSL=tp2==POSITION_TYPE_BUY?NormalizeDouble(price-TrailingStepPips*pf*pt,dg):NormalizeDouble(price+TrailingStepPips*pf*pt,dg);
     bool mod=(tp2==POSITION_TYPE_BUY&&(cSL==0||nSL>cSL))||(tp2==POSITION_TYPE_SELL&&(cSL==0||nSL<cSL));
     if(mod) trade.PositionModify(tk,nSL,cTP); }}
 
@@ -2182,13 +2428,15 @@ void ApplyBreakeven()
 { if(!UseBreakeven) return;
   for(int i=PositionsTotal()-1;i>=0;i--)
   { ulong tk=PositionGetTicket(i); if(tk==0||!PositionSelectByTicket(tk)) continue;
-    if(PositionGetString(POSITION_SYMBOL)!=_Symbol||PositionGetInteger(POSITION_MAGIC)!=MAGIC_NUMBER) continue;
+    if(PositionGetInteger(POSITION_MAGIC)!=MAGIC_NUMBER) continue;
+    string posSym=PositionGetString(POSITION_SYMBOL);
+    double pt=SymbolInfoDouble(posSym,SYMBOL_POINT); int dg=(int)SymbolInfoInteger(posSym,SYMBOL_DIGITS); double pf=PipFactorFor(posSym);
     ENUM_POSITION_TYPE tp2=(ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
     double op=PositionGetDouble(POSITION_PRICE_OPEN),cSL=PositionGetDouble(POSITION_SL),cTP=PositionGetDouble(POSITION_TP);
-    double price=tp2==POSITION_TYPE_BUY?SymbolInfoDouble(_Symbol,SYMBOL_BID):SymbolInfoDouble(_Symbol,SYMBOL_ASK);
-    double pp=tp2==POSITION_TYPE_BUY?(price-op)/_Point/PipFactor:(op-price)/_Point/PipFactor;
+    double price=tp2==POSITION_TYPE_BUY?SymbolInfoDouble(posSym,SYMBOL_BID):SymbolInfoDouble(posSym,SYMBOL_ASK);
+    double pp=tp2==POSITION_TYPE_BUY?(price-op)/pt/pf:(op-price)/pt/pf;
     if(pp<BreakevenTriggerPips) continue;
-    double beSL=tp2==POSITION_TYPE_BUY?NormalizeDouble(op+2*_Point,_Digits):NormalizeDouble(op-2*_Point,_Digits);
+    double beSL=tp2==POSITION_TYPE_BUY?NormalizeDouble(op+2*pt,dg):NormalizeDouble(op-2*pt,dg);
     bool mod=(tp2==POSITION_TYPE_BUY&&(cSL==0||beSL>cSL))||(tp2==POSITION_TYPE_SELL&&(cSL==0||beSL<cSL));
     if(mod) trade.PositionModify(tk,beSL,cTP); }}
 
@@ -2196,7 +2444,7 @@ void CheckFridayClose()
 { if(!CloseOnFriday||!IsFridayCutoff()) return;
   for(int i=PositionsTotal()-1;i>=0;i--)
   { ulong tk=PositionGetTicket(i); if(tk>0&&PositionSelectByTicket(tk))
-    if(PositionGetString(POSITION_SYMBOL)==_Symbol&&PositionGetInteger(POSITION_MAGIC)==MAGIC_NUMBER) trade.PositionClose(tk); }}
+    if(PositionGetInteger(POSITION_MAGIC)==MAGIC_NUMBER) trade.PositionClose(tk); }}
 
 //===================================================================//
 //  DRAWING
@@ -2661,6 +2909,115 @@ void LoadSequenceState(string pfx)
 //===================================================================//
 //  INIT / DEINIT / ONTRADE / ONTICK
 //===================================================================//
+//===================================================================//
+//  [V1.8 MULTI-SYMBOL] HELPERS — symbol-list parsing, per-symbol state
+//  init, account-wide daily-loss cap, and the per-symbol tick driver.
+//===================================================================//
+
+// Generalized per-symbol pip factor (mirrors OnInit's inline PipFactor calc)
+double PipFactorFor(string sym)
+{ int d=(int)SymbolInfoInteger(sym,SYMBOL_DIGITS);
+  if(d==5||d==3) return 10.0; if(d==2) return 100.0; return 1.0; }
+
+// Account-wide daily loss cap: sums realized losses across ALL symbols this
+// EA's magic number closed today (no _Symbol filter). Fixes the multiplicative
+// risk bug — with extras active, the per-symbol IsDailyLossLimitHit() would let
+// each symbol lose up to MaxDailyLossPercent of the WHOLE account independently.
+bool IsAccountDailyLossLimitHit()
+{ if(MaxDailyLossPercent<=0) return false;
+  MqlDateTime dt; TimeToStruct(TimeCurrent(),dt); dt.hour=0;dt.min=0;dt.sec=0;
+  datetime ts=StructToTime(dt);
+  double todayLossAcct=0;
+  if(HistorySelect(ts,TimeCurrent()))
+     for(int i=HistoryDealsTotal()-1;i>=0;i--)
+     { ulong d=HistoryDealGetTicket(i); if(d==0) continue;
+       if(HistoryDealGetInteger(d,DEAL_MAGIC)!=MAGIC_NUMBER||HistoryDealGetInteger(d,DEAL_ENTRY)!=DEAL_ENTRY_OUT) continue;
+       double p=HistoryDealGetDouble(d,DEAL_PROFIT); if(p<0) todayLossAcct+=MathAbs(p); }
+  double b=AccountInfoDouble(ACCOUNT_BALANCE),e=AccountInfoDouble(ACCOUNT_EQUITY);
+  TodayLoss=todayLossAcct;
+  return(todayLossAcct>=MathMin(b,e)*MaxDailyLossPercent/100.0); }
+
+// Linear search by name (MQL5 has no std::map)
+int FindExtraSymIndex(string sym)
+{ for(int i=0;i<extraSymbolCount;i++) if(extraSym[i].name==sym) return i; return -1; }
+
+// Create the 5 indicator handles for an extra symbol + zero its struct slot.
+bool InitExtraSymState(int idx,string sym)
+{ ExtraSymState st; // zero-initialized
+  st.name=sym;
+  st.atrHandle    =iATR(sym,PERIOD_M15,14);
+  st.atrHandleH1  =iATR(sym,PERIOD_H1,14);
+  st.fastEMAHandle=iMA(sym,PERIOD_H1,50, 0,MODE_EMA,PRICE_CLOSE);
+  st.slowEMAHandle=iMA(sym,PERIOD_H1,200,0,MODE_EMA,PRICE_CLOSE);
+  st.h4EMAHandle  =iMA(sym,PERIOD_H4,50, 0,MODE_EMA,PRICE_CLOSE);
+  if(st.atrHandle==INVALID_HANDLE||st.atrHandleH1==INVALID_HANDLE||st.fastEMAHandle==INVALID_HANDLE||
+     st.slowEMAHandle==INVALID_HANDLE||st.h4EMAHandle==INVALID_HANDLE)
+  { Print("[",sym,"] EXTRA: indicator handle failed — symbol skipped"); st.isActive=false; }
+  else st.isActive=true;
+  st.pipFactor=PipFactorFor(sym);
+  st.lastBarTime=0; st.lastTradeCloseTime=0;
+  st.htfLevelReached=false; st.mssConfirmed=false; st.bosConfirmed=false; st.liquiditySweepDone=false;
+  st.cisd5MinConfirmed=false; st.lastCISDTime5Min=0; st.cisd1MinConfirmed=false; st.lastCISDTime1Min=0;
+  st.fvgCount1Min=-1;
+  st.lastSwingHighH1=0; st.lastSwingLowH1=0; st.lastSwingHighM15=0; st.lastSwingLowM15=0;
+  st.lastTradeScore=0; st.lastFailedStep=0; st.lastFailedStepDesc="";
+  st.todayTradeCount=0; st.lastTradeDay=0; st.consecutiveLosses=0;
+  extraSym[idx]=st;
+  return st.isActive; }
+
+// Parse the ExtraTradeSymbols CSV into extraSym[]/extraSymbolList[].
+// Skips blanks, the chart symbol itself, and duplicates. Calls SymbolSelect.
+void ParseExtraSymbolList()
+{ extraSymbolCount=0;
+  if(!ExtraSymbolsEnabled) return;
+  string raw=ExtraTradeSymbols; StringTrimLeft(raw); StringTrimRight(raw);
+  if(StringLen(raw)==0) return;
+  string parts[]; int n=StringSplit(raw,',',parts);
+  if(n<=0) return;
+  ArrayResize(extraSym,n); ArrayResize(extraSymbolList,n);
+  for(int i=0;i<n;i++)
+  { string s=parts[i]; StringTrimLeft(s); StringTrimRight(s);
+    if(StringLen(s)==0) continue;
+    if(s==_Symbol) continue;                 // chart symbol handled by the existing path
+    if(FindExtraSymIndex(s)>=0) continue;     // dedup
+    if(!SymbolSelect(s,true)){ Print("[",s,"] EXTRA: SymbolSelect failed — skipped"); continue; }
+    int idx=extraSymbolCount;
+    extraSymbolList[idx]=s; extraSym[idx].name=s; extraSymbolCount++;
+    InitExtraSymState(idx,s); }
+  Print("EXTRA ENGINE: ",extraSymbolCount," symbol(s) active out of ",n," requested"); }
+
+// Per-symbol tick driver — mirrors OnTick's chart-symbol gating with per-symbol
+// state. Account-wide loss/trade caps are checked once in OnTick before this runs.
+void ProcessExtraSymbol(int idx)
+{ if(idx<0||idx>=extraSymbolCount) return;
+  string sym=extraSym[idx].name;
+  if(!extraSym[idx].isActive) return;
+
+  // Per-symbol daily counter reset
+  MqlDateTime dnow; TimeToStruct(TimeCurrent(),dnow);
+  if(dnow.day!=extraSym[idx].lastTradeDay)
+  { extraSym[idx].todayTradeCount=0; extraSym[idx].lastTradeDay=dnow.day;
+    if(ResetLossStreakDaily) extraSym[idx].consecutiveLosses=0; }
+
+  // Per-symbol trade cap (0 = auto-derive from MaxTradesPerDay)
+  int symCap=(ExtraMaxTradesPerDay>0)?ExtraMaxTradesPerDay:MaxTradesPerDay;
+  if(extraSym[idx].todayTradeCount>=symCap) return;
+  if(extraSym[idx].consecutiveLosses>=MaxConsecutiveLosses) return;
+  if(!IsSpreadOK(sym)) return;
+  if(IsPositionOpen(sym)) return;
+  if(effCooldown>0&&extraSym[idx].lastTradeCloseTime>0&&
+     TimeCurrent()-extraSym[idx].lastTradeCloseTime<(datetime)(effCooldown*60)) return;
+  if(UseTimeFilter&&!IsTradingTime()) return;
+
+  datetime barTime[1]; if(CopyTime(sym,PERIOD_M15,0,1,barTime)!=1) return;
+  if(barTime[0]!=extraSym[idx].lastBarTime)
+  { extraSym[idx].lastBarTime=barTime[0]; extraSym[idx].cisd1MinConfirmed=false;
+    UpdateContextStateExtra(sym,extraSym[idx]); }
+
+  bool isBuy=true;
+  if(CheckTwinsSequenceExtra(sym,extraSym[idx],isBuy))
+    PlaceTradeExtra(sym,extraSym[idx],isBuy); }
+
 int OnInit()
 { ApplySymbolPreset(); ApplyOptimizationMode(); ApplyTradingStyle();
   ATRHandle    =iATR(_Symbol,PERIOD_M15,14);
@@ -2708,7 +3065,15 @@ int OnInit()
   LoadSequenceState(pfx); // [V1.8] restore MSS/BOS/sweep gate + OB/FVG/liquidity zone history across reinit (timeframe switch, recompile, etc.)
   sessionStartEquity=AccountInfoDouble(ACCOUNT_EQUITY); sessionPeakEquity=sessionStartEquity;
   UpdateKillzoneBoxes(); DetectLiquidityZones(); UpdateLiquidityZoneSweep(); DetectSwingStructure(); // [V1.8] paint immediately on load/reload, don't wait for the first tick
-  PanelLoadPosition(); return INIT_SUCCEEDED; }
+  PanelLoadPosition();
+  ParseExtraSymbolList(); // [V1.8 multi-symbol] build the extra-symbol engine (no-op when disabled / list empty)
+  // Seed the OnTrade() watermark to the newest existing deal so we only count
+  // deals closed during this run (stats are restored from GlobalVariables above).
+  lastProcessedDeal=0;
+  if(HistorySelect(0,TimeCurrent()))
+    for(int i=HistoryDealsTotal()-1;i>=0;i--)
+    { ulong dtk=HistoryDealGetTicket(i); if(dtk>lastProcessedDeal) lastProcessedDeal=dtk; }
+  return INIT_SUCCEEDED; }
 
 void OnDeinit(const int reason)
 { if(ATRHandle    !=INVALID_HANDLE) IndicatorRelease(ATRHandle);
@@ -2716,6 +3081,12 @@ void OnDeinit(const int reason)
   if(FastEMAHandle!=INVALID_HANDLE) IndicatorRelease(FastEMAHandle);
   if(SlowEMAHandle!=INVALID_HANDLE) IndicatorRelease(SlowEMAHandle);
   if(H4EMAHandle  !=INVALID_HANDLE) IndicatorRelease(H4EMAHandle);  // [V1.6]
+  for(int i=0;i<extraSymbolCount;i++)  // [V1.8 multi-symbol] release extra-symbol handles
+  { if(extraSym[i].atrHandle    !=INVALID_HANDLE) IndicatorRelease(extraSym[i].atrHandle);
+    if(extraSym[i].atrHandleH1  !=INVALID_HANDLE) IndicatorRelease(extraSym[i].atrHandleH1);
+    if(extraSym[i].fastEMAHandle!=INVALID_HANDLE) IndicatorRelease(extraSym[i].fastEMAHandle);
+    if(extraSym[i].slowEMAHandle!=INVALID_HANDLE) IndicatorRelease(extraSym[i].slowEMAHandle);
+    if(extraSym[i].h4EMAHandle  !=INVALID_HANDLE) IndicatorRelease(extraSym[i].h4EMAHandle); }
   for(int i=0;i<MaxSwingLines;i++) if(SwingLineNames[i]!="") ObjectDelete(0,SwingLineNames[i]);
   for(int i=0;i<5;i++) if(OTEObjectNames[i]!="") ObjectDelete(0,OTEObjectNames[i]);
   string pfx=EA_NAME+"_"+_Symbol+"_";
@@ -2732,39 +3103,79 @@ void OnDeinit(const int reason)
   ObjectsDeleteAll(0,"ICTSWING_"); // [V1.8]
   Comment(""); }
 
+// [V1.8 multi-symbol] Chart-symbol closed-deal handler — today's exact logic body,
+// factored out unchanged so OnTrade() can route deals by symbol.
+void ProcessClosedDeal_ChartSymbol(ulong tk)
+{ double profit=HistoryDealGetDouble(tk,DEAL_PROFIT);
+  statTotalTrades++;statTotalProfit+=(profit>0)?profit:0;statTotalLoss+=(profit<0)?MathAbs(profit):0;
+  ulong posID=(ulong)HistoryDealGetInteger(tk,DEAL_POSITION_ID);
+  string rrKey="TWINS_RR_"+IntegerToString(posID),ptlKey="TWINS_PTL_"+IntegerToString(posID);
+  if(profit>0){statWins++;consecutiveLosses=0;consecutiveWins++;if(GlobalVariableCheck(rrKey)){statSumRR+=GlobalVariableGet(rrKey);GlobalVariableDel(rrKey);}}
+  else if(profit<0){statLosses++;consecutiveLosses++;consecutiveWins=0;TodayLossTrades++;if(GlobalVariableCheck(rrKey))GlobalVariableDel(rrKey);}
+  if(GlobalVariableCheck(ptlKey)) GlobalVariableDel(ptlKey);
+  LastTradeCloseTime=TimeCurrent();
+  cisd5MinConfirmed=false;cisd1MinConfirmed=false;mssConfirmed=false;bosConfirmed=false;liquiditySweepDone=false;htfLevelReached=false;fvgCount1Min=-1;
+  bool dBuy=(HistoryDealGetInteger(tk,DEAL_TYPE)==DEAL_TYPE_BUY);
+  WriteCSVLog("CLOSE",posID,dBuy,HistoryDealGetDouble(tk,DEAL_PRICE),0,0,HistoryDealGetDouble(tk,DEAL_VOLUME),profit,lastTradeScore,profit>=0?"WIN":"LOSS");
+  WriteTradeHistoryLog(posID,profit);  // [ML] write full trade record with MFE/MAE
+  TakeScreenshot(profit>=0?"WIN_CLOSE":"LOSS_CLOSE");
+  double eq=AccountInfoDouble(ACCOUNT_EQUITY);
+  if(eq>sessionPeakEquity) sessionPeakEquity=eq;
+  if(sessionPeakEquity-eq>sessionMaxDrawdown) sessionMaxDrawdown=sessionPeakEquity-eq;
+  string pfx=EA_NAME+"_"+_Symbol+"_";
+  GlobalVariableSet(pfx+"Trades",statTotalTrades);GlobalVariableSet(pfx+"Wins",statWins);
+  GlobalVariableSet(pfx+"Losses",statLosses);GlobalVariableSet(pfx+"Profit",statTotalProfit);
+  GlobalVariableSet(pfx+"Loss",statTotalLoss);GlobalVariableSet(pfx+"SumRR",statSumRR); }
+
+// [V1.8 multi-symbol] Extra-symbol closed-deal handler — updates that symbol's
+// loss-streak / cooldown / sequence state and cleans up its TWINS_RR_ var.
+void ProcessClosedDeal_Extra(int idx,ulong tk)
+{ double profit=HistoryDealGetDouble(tk,DEAL_PROFIT);
+  ulong posID=(ulong)HistoryDealGetInteger(tk,DEAL_POSITION_ID);
+  string rrKey="TWINS_RR_"+IntegerToString(posID);
+  if(profit>0){extraSym[idx].consecutiveLosses=0;if(GlobalVariableCheck(rrKey))GlobalVariableDel(rrKey);}
+  else if(profit<0){extraSym[idx].consecutiveLosses++;if(GlobalVariableCheck(rrKey))GlobalVariableDel(rrKey);}
+  extraSym[idx].lastTradeCloseTime=TimeCurrent();
+  extraSym[idx].cisd5MinConfirmed=false;extraSym[idx].cisd1MinConfirmed=false;
+  extraSym[idx].mssConfirmed=false;extraSym[idx].bosConfirmed=false;
+  extraSym[idx].liquiditySweepDone=false;extraSym[idx].htfLevelReached=false;extraSym[idx].fvgCount1Min=-1;
+  if(ExtraDebugLog) Print("[",extraSym[idx].name,"] CLOSED ",(profit>=0?"WIN":"LOSS")," profit=",DoubleToString(profit,2)); }
+
 void OnTrade()
 { if(!HistorySelect(TimeCurrent()-86400,TimeCurrent())) return;
-  for(int i=HistoryDealsTotal()-1;i>=0;i--)
+  // Drain ALL newly-closed deals (ticket > watermark), ascending, routing each by
+  // symbol. Replaces the old single-deal-per-call break that only worked because
+  // exactly one symbol ever closed trades under this magic number.
+  ulong maxTk=lastProcessedDeal;
+  for(int i=0;i<HistoryDealsTotal();i++)
   { ulong tk=HistoryDealGetTicket(i); if(tk==0) continue;
-    if(HistoryDealGetString(tk,DEAL_SYMBOL)!=_Symbol||HistoryDealGetInteger(tk,DEAL_MAGIC)!=MAGIC_NUMBER||HistoryDealGetInteger(tk,DEAL_ENTRY)!=DEAL_ENTRY_OUT) continue;
-    static ulong lp=0; if(tk==lp) break; lp=tk;
-    double profit=HistoryDealGetDouble(tk,DEAL_PROFIT);
-    statTotalTrades++;statTotalProfit+=(profit>0)?profit:0;statTotalLoss+=(profit<0)?MathAbs(profit):0;
-    ulong posID=(ulong)HistoryDealGetInteger(tk,DEAL_POSITION_ID);
-    string rrKey="TWINS_RR_"+IntegerToString(posID),ptlKey="TWINS_PTL_"+IntegerToString(posID);
-    if(profit>0){statWins++;consecutiveLosses=0;consecutiveWins++;if(GlobalVariableCheck(rrKey)){statSumRR+=GlobalVariableGet(rrKey);GlobalVariableDel(rrKey);}}
-    else if(profit<0){statLosses++;consecutiveLosses++;consecutiveWins=0;TodayLossTrades++;if(GlobalVariableCheck(rrKey))GlobalVariableDel(rrKey);}
-    if(GlobalVariableCheck(ptlKey)) GlobalVariableDel(ptlKey);
-    LastTradeCloseTime=TimeCurrent();
-    cisd5MinConfirmed=false;cisd1MinConfirmed=false;mssConfirmed=false;bosConfirmed=false;liquiditySweepDone=false;htfLevelReached=false;fvgCount1Min=-1;
-    bool dBuy=(HistoryDealGetInteger(tk,DEAL_TYPE)==DEAL_TYPE_BUY);
-    WriteCSVLog("CLOSE",posID,dBuy,HistoryDealGetDouble(tk,DEAL_PRICE),0,0,HistoryDealGetDouble(tk,DEAL_VOLUME),profit,lastTradeScore,profit>=0?"WIN":"LOSS");
-    WriteTradeHistoryLog(posID,profit);  // [ML] write full trade record with MFE/MAE
-    TakeScreenshot(profit>=0?"WIN_CLOSE":"LOSS_CLOSE");
-    double eq=AccountInfoDouble(ACCOUNT_EQUITY);
-    if(eq>sessionPeakEquity) sessionPeakEquity=eq;
-    if(sessionPeakEquity-eq>sessionMaxDrawdown) sessionMaxDrawdown=sessionPeakEquity-eq;
-    string pfx=EA_NAME+"_"+_Symbol+"_";
-    GlobalVariableSet(pfx+"Trades",statTotalTrades);GlobalVariableSet(pfx+"Wins",statWins);
-    GlobalVariableSet(pfx+"Losses",statLosses);GlobalVariableSet(pfx+"Profit",statTotalProfit);
-    GlobalVariableSet(pfx+"Loss",statTotalLoss);GlobalVariableSet(pfx+"SumRR",statSumRR); break; } }
+    if(tk<=lastProcessedDeal) continue;
+    if(tk>maxTk) maxTk=tk;
+    if(HistoryDealGetInteger(tk,DEAL_MAGIC)!=MAGIC_NUMBER||HistoryDealGetInteger(tk,DEAL_ENTRY)!=DEAL_ENTRY_OUT) continue;
+    string dsym=HistoryDealGetString(tk,DEAL_SYMBOL);
+    if(dsym==_Symbol) ProcessClosedDeal_ChartSymbol(tk);
+    else { int idx=FindExtraSymIndex(dsym); if(idx>=0) ProcessClosedDeal_Extra(idx,tk); }
+  }
+  lastProcessedDeal=maxTk; }
 
 void OnTick()
 { UpdateDisplay(); CheckFridayClose(); CheckPartialTP(); ApplyBreakeven(); ApplyTrailingStop();
   UpdateMFEMAE();  // [ML] track max favorable/adverse excursion every tick
   DetectFVGZones(); UpdateOrderBlockMitigation(); UpdateFVGMitigation(); UpdateKillzoneBoxes();  // [V1.8]
   DetectLiquidityZones(); UpdateLiquidityZoneSweep(); DetectSwingStructure();  // [V1.8]
+
+  // [V1.8 multi-symbol] Account-wide caps shared by chart symbol + all extras
+  bool accountDailyLossHit=IsAccountDailyLossLimitHit();
+  int  accountTradesTotal=TodayTradeCount;
+  for(int i=0;i<extraSymbolCount;i++) accountTradesTotal+=extraSym[i].todayTradeCount;
+  bool accountTradeCapHit=(accountTradesTotal>=MaxTradesPerDay);
+  // Drive the extra-symbol engine BEFORE any chart-symbol early return below,
+  // so extras still trade when the chart symbol's own gates bail out this tick.
+  if(ExtraSymbolsEnabled&&extraSymbolCount>0&&!accountDailyLossHit&&!accountTradeCapHit)
+    for(int i=0;i<extraSymbolCount;i++) ProcessExtraSymbol(i);
+
   if(ForceTrades){static datetime lf=0;if(TimeCurrent()-lf>=60&&CanTrade()){lf=TimeCurrent();PlaceTrade();}return;}
+  if(accountDailyLossHit||accountTradeCapHit) return;
   if(!CanTrade()) return;
   if(!IsTradingTime())
   { static datetime lastTTLog=0;
