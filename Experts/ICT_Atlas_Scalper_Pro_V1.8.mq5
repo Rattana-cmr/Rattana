@@ -263,10 +263,17 @@ input double ExtraRiskPercent      = 0.0;    // Risk % per trade for extra symbo
 input int    ExtraMaxTradesPerDay  = 0;      // Per-extra-symbol daily trade cap. 0 = auto-derive from MaxTradesPerDay
 input bool   ExtraDebugLog         = false;  // Print debug info for the extra-symbol engine
 
+input group "========== REGIME FILTER (TREND STRENGTH) =========="
+input bool            UseRegimeFilter  = false;      // Only trade when the market is trending (ADX gate). Skips ranging/chop regimes.
+input ENUM_TIMEFRAMES RegimeTF         = PERIOD_H4;  // Timeframe the trend-strength (ADX) is measured on
+input int             RegimeADXPeriod  = 14;         // ADX period (Wilder standard = 14)
+input double          RegimeMinADX     = 22.0;       // Minimum ADX to allow entries (below = ranging; textbook trend threshold ~20-25)
+
 //===================================================================//
 //  GLOBALS
 //===================================================================//
 int      ATRHandle      = INVALID_HANDLE;
+int      ADXHandle      = INVALID_HANDLE;   // [regime] trend-strength gate
 int      ATRHandleH1    = INVALID_HANDLE;   // [V1.6] H1 ATR for adaptive range
 int      FastEMAHandle  = INVALID_HANDLE;
 int      SlowEMAHandle  = INVALID_HANDLE;
@@ -469,7 +476,7 @@ string SMTMarkerNames[]; int SMTMarkerIdx=0;   // [V1.8]
 struct ExtraSymState
 {
    string   name;
-   int      atrHandle, atrHandleH1, fastEMAHandle, slowEMAHandle, h4EMAHandle;
+   int      atrHandle, atrHandleH1, fastEMAHandle, slowEMAHandle, h4EMAHandle, adxHandle;
    double   pipFactor;
    datetime lastBarTime, lastTradeCloseTime;
    bool     htfLevelReached;
@@ -758,6 +765,17 @@ double GetATRH1()
 // [V1.8 multi-symbol] Handle-bound ATR read, generalizes GetATR()/GetATRH1() for any symbol's handle
 double GetATRFor(int handle,double pointSize)
 { double a[1]; if(handle!=INVALID_HANDLE&&CopyBuffer(handle,0,1,1,a)==1) return a[0]; return pointSize*100; }
+
+// [regime] Trend-strength (ADX main line, buffer 0) for a symbol's ADX handle.
+// Returns -1 on read failure so the gate fails OPEN (never blocks on a data gap).
+double GetADXFor(int handle)
+{ double a[1]; if(handle!=INVALID_HANDLE&&CopyBuffer(handle,0,1,1,a)==1) return a[0]; return -1.0; }
+
+// [regime] true when the gate should BLOCK this entry (filter on AND ADX confirms ranging)
+bool RegimeBlocksEntry(int adxHandle)
+{ if(!UseRegimeFilter) return false;
+  double adx=GetADXFor(adxHandle);
+  return (adx>=0.0 && adx<RegimeMinADX); }
 
 bool IsPositionOpen(string sym=NULL)
 { if(sym==NULL) sym=_Symbol;
@@ -1767,6 +1785,8 @@ bool CheckTwinsSequence(bool &isBuy)
    if(UseTimeFilter&&!IsTradingTime()) return false;
    if(UseKillzoneFilter&&!InActiveKillzone())
    { if(newBar){RejKZ();rejSeqLastBar=curBar;} lastFailedStep=7;lastFailedStepDesc="Killzone";return false; }
+   if(RegimeBlocksEntry(ADXHandle))  // [regime] skip ranging/chop markets
+   { if(newBar){rejSeqLastBar=curBar;} lastFailedStep=7;lastFailedStepDesc="Regime (ADX<"+DoubleToString(RegimeMinADX,0)+")";return false; }
    if(!htfLevelReached||!mssConfirmed||!bosConfirmed||!liquiditySweepDone||
       fvgCount1Min<0||lastSwingHighH1<=0||lastSwingLowH1<=0)
    { if(newBar){DebugPrint("Entry: context not ready");rejSeqLastBar=curBar;} return false; }  // [fix] was printing every tick, not once per bar -> multi-GB logs
@@ -1926,6 +1946,8 @@ bool CheckTwinsSequenceExtra(string sym,ExtraSymState &st,bool &isBuy)
 {
    if(UseTimeFilter&&!IsTradingTime()) return false;
    if(UseKillzoneFilter&&!InActiveKillzone()) return false;
+   if(RegimeBlocksEntry(st.adxHandle))  // [regime] skip ranging/chop markets
+   { st.lastFailedStep=7;st.lastFailedStepDesc="Regime (ADX)";return false; }
    if(!st.htfLevelReached||!st.mssConfirmed||!st.bosConfirmed||!st.liquiditySweepDone||
       st.fvgCount1Min<0||st.lastSwingHighH1<=0||st.lastSwingLowH1<=0) return false;
 
@@ -2950,6 +2972,7 @@ bool InitExtraSymState(int idx,string sym)
   st.fastEMAHandle=iMA(sym,PERIOD_H1,50, 0,MODE_EMA,PRICE_CLOSE);
   st.slowEMAHandle=iMA(sym,PERIOD_H1,200,0,MODE_EMA,PRICE_CLOSE);
   st.h4EMAHandle  =iMA(sym,PERIOD_H4,50, 0,MODE_EMA,PRICE_CLOSE);
+  st.adxHandle    =iADX(sym,RegimeTF,RegimeADXPeriod);  // [regime]
   if(st.atrHandle==INVALID_HANDLE||st.atrHandleH1==INVALID_HANDLE||st.fastEMAHandle==INVALID_HANDLE||
      st.slowEMAHandle==INVALID_HANDLE||st.h4EMAHandle==INVALID_HANDLE)
   { Print("[",sym,"] EXTRA: indicator handle failed — symbol skipped"); st.isActive=false; }
@@ -3025,6 +3048,7 @@ int OnInit()
   FastEMAHandle=iMA(_Symbol,PERIOD_H1,50, 0,MODE_EMA,PRICE_CLOSE);
   SlowEMAHandle=iMA(_Symbol,PERIOD_H1,200,0,MODE_EMA,PRICE_CLOSE);
   H4EMAHandle  =iMA(_Symbol,PERIOD_H4,50, 0,MODE_EMA,PRICE_CLOSE); // [V1.6] cached
+  ADXHandle    =iADX(_Symbol,RegimeTF,RegimeADXPeriod);             // [regime] trend-strength gate (fails open if invalid)
   if(ATRHandle==INVALID_HANDLE||FastEMAHandle==INVALID_HANDLE||SlowEMAHandle==INVALID_HANDLE||H4EMAHandle==INVALID_HANDLE)
   {Alert(EA_NAME+": Indicator handle failed");return INIT_FAILED;}
   trade.SetExpertMagicNumber(MAGIC_NUMBER); trade.SetDeviationInPoints(30); trade.SetTypeFillingBySymbol(_Symbol);
@@ -3081,12 +3105,14 @@ void OnDeinit(const int reason)
   if(FastEMAHandle!=INVALID_HANDLE) IndicatorRelease(FastEMAHandle);
   if(SlowEMAHandle!=INVALID_HANDLE) IndicatorRelease(SlowEMAHandle);
   if(H4EMAHandle  !=INVALID_HANDLE) IndicatorRelease(H4EMAHandle);  // [V1.6]
+  if(ADXHandle    !=INVALID_HANDLE) IndicatorRelease(ADXHandle);    // [regime]
   for(int i=0;i<extraSymbolCount;i++)  // [V1.8 multi-symbol] release extra-symbol handles
   { if(extraSym[i].atrHandle    !=INVALID_HANDLE) IndicatorRelease(extraSym[i].atrHandle);
     if(extraSym[i].atrHandleH1  !=INVALID_HANDLE) IndicatorRelease(extraSym[i].atrHandleH1);
     if(extraSym[i].fastEMAHandle!=INVALID_HANDLE) IndicatorRelease(extraSym[i].fastEMAHandle);
     if(extraSym[i].slowEMAHandle!=INVALID_HANDLE) IndicatorRelease(extraSym[i].slowEMAHandle);
-    if(extraSym[i].h4EMAHandle  !=INVALID_HANDLE) IndicatorRelease(extraSym[i].h4EMAHandle); }
+    if(extraSym[i].h4EMAHandle  !=INVALID_HANDLE) IndicatorRelease(extraSym[i].h4EMAHandle);
+    if(extraSym[i].adxHandle    !=INVALID_HANDLE) IndicatorRelease(extraSym[i].adxHandle); }
   for(int i=0;i<MaxSwingLines;i++) if(SwingLineNames[i]!="") ObjectDelete(0,SwingLineNames[i]);
   for(int i=0;i<5;i++) if(OTEObjectNames[i]!="") ObjectDelete(0,OTEObjectNames[i]);
   string pfx=EA_NAME+"_"+_Symbol+"_";
