@@ -817,18 +817,18 @@ bool DetectBOS(bool &isBullish,datetime &pivotTime,double &pivotPrice)
       if(isH&&i<swHBar){swHigh=m15[i].high;swHBar=i;}
       if(isL&&i<swLBar){swLow =m15[i].low; swLBar=i;}
    }
-   if(swHBar==INT_MAX&&swLBar==INT_MAX) return false;
+   if(swHBar==INT_MAX||swLBar==INT_MAX) return false;  // [fix] need both pivots to order which one is being broken
 
    double atr=GetATR();
    for(int i=0;i<=1;i++)
    { double body=MathAbs(m15[i].close-m15[i].open); bool bull=m15[i].close>m15[i].open;
-     if(bull&&body>atr*0.3&&swHigh>0&&m15[i].close>swHigh){ isBullish=true;  pivotTime=m15[swHBar].time; pivotPrice=swHigh; return true; }
-     if(!bull&&body>atr*0.3&&swLow>0 &&m15[i].close<swLow) { isBullish=false; pivotTime=m15[swLBar].time; pivotPrice=swLow;  return true; } }
+     if(bull&&body>atr*0.3&&swLBar<swHBar&&m15[i].close>swHigh){ isBullish=true;  pivotTime=m15[swHBar].time; pivotPrice=swHigh; return true; }
+     if(!bull&&body>atr*0.3&&swHBar<swLBar&&m15[i].close<swLow) { isBullish=false; pivotTime=m15[swLBar].time; pivotPrice=swLow;  return true; } }
 
    double chkH=MathMax(m15[0].close,m15[1].close);
    double chkL=MathMin(m15[0].close,m15[1].close);
-   if(swHigh>0&&chkH>swHigh){ isBullish=true;  pivotTime=m15[swHBar].time; pivotPrice=swHigh; return true; }
-   if(swLow >0&&chkL<swLow) { isBullish=false; pivotTime=m15[swLBar].time; pivotPrice=swLow;  return true; }
+   if(swLBar<swHBar&&chkH>swHigh){ isBullish=true;  pivotTime=m15[swHBar].time; pivotPrice=swHigh; return true; }
+   if(swHBar<swLBar&&chkL<swLow) { isBullish=false; pivotTime=m15[swLBar].time; pivotPrice=swLow;  return true; }
    return false;
 }
 
@@ -2782,9 +2782,10 @@ void OnTick()
   bool isBuy=true;
   static datetime lastReportBar=0;
   static datetime lastSignalBar=0;
+  static datetime lastSetupBar=0;
   datetime repBar=iTime(_Symbol,PERIOD_M15,0);
   if(CheckTwinsSequence(isBuy))
-  { cumSetupsDetected++;
+  { if(repBar!=lastSetupBar){lastSetupBar=repBar;cumSetupsDetected++;}  // [fix] count once per bar, not once per tick
     WriteSignalLog(isBuy,true,"",lastTradeScore);  // [ML] log accepted signal
     PlaceTrade(isBuy); }
   else if(lastFailedStep>0&&repBar!=lastSignalBar)
