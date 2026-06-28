@@ -76,7 +76,7 @@ input int      PartialClosePercent    = 50;       // Percent of position to clos
 
 //===================== SWING DETECTION =====================//
 input group "========== SWING DETECTION =========="
-input int      SwingLookbackBars      = 100;      // H1 bars to scan
+input int      SwingLookbackBars      = 50;       // H1 bars to scan
 input int      SwingConfirmBars       = 5;        // Bars each side to confirm
 input bool     ShowSwingLines         = true;     // Draw swing lines on chart
 
