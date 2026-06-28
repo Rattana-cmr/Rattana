@@ -93,6 +93,13 @@ input double   ExtraRiskPercent       = 0.0;      // Risk % per trade for extras
 input int      ExtraMaxTradesPerDay   = 0;        // Per-extra-symbol daily trade cap. 0 = use MaxTradesPerDay
 input bool     ExtraDebugLog          = false;    // Print debug info for the extra-symbol engine
 
+//===================== REGIME FILTER (TREND STRENGTH) =====================//
+input group "========== REGIME FILTER (TREND STRENGTH) =========="
+input bool            UseRegimeFilter  = false;      // Only trade when trending (ADX gate). Skips ranging/chop regimes.
+input ENUM_TIMEFRAMES RegimeTF         = PERIOD_H4;  // Timeframe the trend-strength (ADX) is measured on
+input int             RegimeADXPeriod  = 14;         // ADX period (Wilder standard = 14)
+input double          RegimeMinADX     = 22.0;       // Minimum ADX to allow entries (below = ranging; textbook trend ~20-25)
+
 //===================== GLOBAL VARIABLES =====================//
 int ATRHandle;
 int FastEMAHandle;
@@ -100,6 +107,7 @@ int SlowEMAHandle;
 int H4FastEMAHandle;
 int H4SlowEMAHandle;
 int RSIHandle;
+int ADXHandle = INVALID_HANDLE;   // [regime] trend-strength gate
 datetime LastBarTime  = 0;
 datetime LastTradeCloseOrOpenTime = 0;
 int TodayTradeCount   = 0;
@@ -120,7 +128,7 @@ int  DragOffsetY    = 0;
 struct ConfSymState
 {
    string   name;
-   int      atrHandle, fastEMAHandle, slowEMAHandle, h4FastEMAHandle, h4SlowEMAHandle, rsiHandle;
+   int      atrHandle, fastEMAHandle, slowEMAHandle, h4FastEMAHandle, h4SlowEMAHandle, rsiHandle, adxHandle;
    double   pipFactor;
    datetime lastBarTime, lastTradeCloseOrOpenTime;
    int      todayTradeCount, lastTradeDay, consecutiveLosses;
@@ -128,6 +136,24 @@ struct ConfSymState
 };
 ConfSymState extraSym[];
 int          extraSymbolCount = 0;
+
+//+------------------------------------------------------------------+
+//| REGIME FILTER — ADX trend-strength gate                         |
+//| Reads the ADX main line; fails OPEN (returns -1 -> never blocks) |
+//| on a data gap so a transient read never halts trading.          |
+//+------------------------------------------------------------------+
+double GetADXFor(int handle)
+{
+   double a[1];
+   if(handle != INVALID_HANDLE && CopyBuffer(handle, 0, 1, 1, a) == 1) return a[0];
+   return -1.0;
+}
+bool RegimeBlocksEntry(int adxHandle)
+{
+   if(!UseRegimeFilter) return false;
+   double adx = GetADXFor(adxHandle);
+   return (adx >= 0.0 && adx < RegimeMinADX);
+}
 
 //+------------------------------------------------------------------+
 //| INITIALIZATION                                                   |
@@ -140,6 +166,7 @@ int OnInit()
    H4FastEMAHandle = iMA(_Symbol, PERIOD_H4, 50,  0, MODE_EMA, PRICE_CLOSE);
    H4SlowEMAHandle = iMA(_Symbol, PERIOD_H4, 200, 0, MODE_EMA, PRICE_CLOSE);
    RSIHandle       = iRSI(_Symbol, PERIOD_H1, RSIPeriod, PRICE_CLOSE);
+   ADXHandle       = iADX(_Symbol, RegimeTF, RegimeADXPeriod);  // [regime]
 
    trade.SetExpertMagicNumber(888777);
    trade.SetDeviationInPoints(30);
@@ -173,6 +200,7 @@ void OnDeinit(const int reason)
    if(H4FastEMAHandle != INVALID_HANDLE) IndicatorRelease(H4FastEMAHandle);
    if(H4SlowEMAHandle != INVALID_HANDLE) IndicatorRelease(H4SlowEMAHandle);
    if(RSIHandle       != INVALID_HANDLE) IndicatorRelease(RSIHandle);
+   if(ADXHandle       != INVALID_HANDLE) IndicatorRelease(ADXHandle);  // [regime]
    for(int i = 0; i < extraSymbolCount; i++)   // [multi-symbol] release extra-symbol handles
    {
       if(extraSym[i].atrHandle       != INVALID_HANDLE) IndicatorRelease(extraSym[i].atrHandle);
@@ -181,6 +209,7 @@ void OnDeinit(const int reason)
       if(extraSym[i].h4FastEMAHandle != INVALID_HANDLE) IndicatorRelease(extraSym[i].h4FastEMAHandle);
       if(extraSym[i].h4SlowEMAHandle != INVALID_HANDLE) IndicatorRelease(extraSym[i].h4SlowEMAHandle);
       if(extraSym[i].rsiHandle       != INVALID_HANDLE) IndicatorRelease(extraSym[i].rsiHandle);
+      if(extraSym[i].adxHandle       != INVALID_HANDLE) IndicatorRelease(extraSym[i].adxHandle);  // [regime]
    }
    ObjectsDeleteAll(0, "SwingLine_");
    ObjectsDeleteAll(0, DPFX);
@@ -916,6 +945,7 @@ void PlaceTrade()
    }
 
    // NORMAL TRADING MODE
+   if(RegimeBlocksEntry(ADXHandle)) { Print("Regime: ranging (ADX<", DoubleToString(RegimeMinADX,0), ") — skipping"); return; }  // [regime]
    int h1Trend = GetTrendDirection();
    int h4Trend = GetH4TrendDirection();
    int candle  = GetCandleDirection();
@@ -1501,6 +1531,7 @@ void PlaceTradeExtra(string sym, ConfSymState &st)
    double pt = SymbolInfoDouble(sym, SYMBOL_POINT);
    int    dg = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
 
+   if(RegimeBlocksEntry(st.adxHandle)) return;  // [regime] skip ranging/chop markets
    int h1Trend = GetEMATrend(st.fastEMAHandle, st.slowEMAHandle);
    int h4Trend = GetEMATrend(st.h4FastEMAHandle, st.h4SlowEMAHandle);
    int candle  = GetCandleDirFor(sym);
@@ -1591,6 +1622,7 @@ void ParseExtraSymbolList()
       st.h4FastEMAHandle  = iMA(s, PERIOD_H4, 50,  0, MODE_EMA, PRICE_CLOSE);
       st.h4SlowEMAHandle  = iMA(s, PERIOD_H4, 200, 0, MODE_EMA, PRICE_CLOSE);
       st.rsiHandle        = iRSI(s, PERIOD_H1, RSIPeriod, PRICE_CLOSE);
+      st.adxHandle        = iADX(s, RegimeTF, RegimeADXPeriod);  // [regime]
       st.isActive = (st.atrHandle != INVALID_HANDLE && st.fastEMAHandle != INVALID_HANDLE &&
                      st.slowEMAHandle != INVALID_HANDLE && st.h4FastEMAHandle != INVALID_HANDLE &&
                      st.h4SlowEMAHandle != INVALID_HANDLE && st.rsiHandle != INVALID_HANDLE);
