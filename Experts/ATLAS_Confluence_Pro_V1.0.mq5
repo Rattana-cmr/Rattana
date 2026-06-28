@@ -84,6 +84,7 @@ input bool     ShowSwingLines         = true;     // Draw swing lines on chart
 input group "========== DEBUG =========="
 input bool     ForceTrades            = false;    // Force trades (testing only)
 input bool     UsePythonRisk          = false;    // AI risk control
+input bool     DebugLog               = false;    // Verbose per-bar reject logging (OFF = small journal; ON floods the log)
 
 //===================== MULTI-SYMBOL (EXTRA) =====================//
 input group "========== MULTI-SYMBOL (EXTRA) =========="
@@ -299,7 +300,7 @@ bool IsSpreadOK()
                     SymbolInfoDouble(_Symbol, SYMBOL_BID)) / _Point;
    if(spread > MaxSpreadPoints)
    {
-      Print("Spread too high: ", spread, " > ", MaxSpreadPoints);
+      if(DebugLog) Print("Spread too high: ", spread, " > ", MaxSpreadPoints);
       return false;
    }
    return true;
@@ -538,8 +539,8 @@ bool IsRSIOK(bool isBuy)
 {
    if(!UseRSIFilter) return true;
    double rsi = GetRSIValue();
-   if(isBuy  && rsi >= RSIOverbought) { Print("RSI too high for BUY: ", DoubleToString(rsi, 1)); return false; }
-   if(!isBuy && rsi <= RSIOversold)   { Print("RSI too low for SELL: ", DoubleToString(rsi, 1)); return false; }
+   if(isBuy  && rsi >= RSIOverbought) { if(DebugLog) Print("RSI too high for BUY: ", DoubleToString(rsi, 1)); return false; }
+   if(!isBuy && rsi <= RSIOversold)   { if(DebugLog) Print("RSI too low for SELL: ", DoubleToString(rsi, 1)); return false; }
    return true;
 }
 
@@ -554,8 +555,8 @@ bool IsPullbackValid(bool isBuy, double entry)
    double fast[1];
    if(CopyBuffer(FastEMAHandle, 0, 1, 1, fast) != 1) return true;
    double maxDist = PullbackATRMultiplier * GetATRPoints() * _Point;
-   if(isBuy  && (entry - fast[0]) > maxDist) { Print("Price too far above EMA for BUY");  return false; }
-   if(!isBuy && (fast[0] - entry) > maxDist) { Print("Price too far below EMA for SELL"); return false; }
+   if(isBuy  && (entry - fast[0]) > maxDist) { if(DebugLog) Print("Price too far above EMA for BUY");  return false; }
+   if(!isBuy && (fast[0] - entry) > maxDist) { if(DebugLog) Print("Price too far below EMA for SELL"); return false; }
    return true;
 }
 
@@ -566,8 +567,8 @@ bool IsVolatilityOK()
 {
    if(!UseATRFilter) return true;
    double atrPoints = GetATRPoints();
-   if(atrPoints < ATRMinPoints) { Print("ATR too low: ",  atrPoints, " < ", ATRMinPoints); return false; }
-   if(atrPoints > ATRMaxPoints) { Print("ATR too high: ", atrPoints, " > ", ATRMaxPoints); return false; }
+   if(atrPoints < ATRMinPoints) { if(DebugLog) Print("ATR too low: ",  atrPoints, " < ", ATRMinPoints); return false; }
+   if(atrPoints > ATRMaxPoints) { if(DebugLog) Print("ATR too high: ", atrPoints, " > ", ATRMaxPoints); return false; }
    return true;
 }
 
@@ -856,19 +857,19 @@ bool CanTrade()
    UpdateDailyCounters();
    if(IsDailyLossLimitHit())
    {
-      Print("BLOCKED: Daily loss limit | TodayLoss=$", DoubleToString(TodayLoss, 2),
+      if(DebugLog) Print("BLOCKED: Daily loss limit | TodayLoss=$", DoubleToString(TodayLoss, 2),
             " >= $", DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE) * MaxDailyLossPercent / 100, 2),
             " (", DoubleToString(MaxDailyLossPercent, 1), "% of balance)");
       return false;
    }
    if(TodayTradeCount >= MaxTradesPerDay)
    {
-      Print("BLOCKED: Max trades/day reached | ", TodayTradeCount, "/", MaxTradesPerDay);
+      if(DebugLog) Print("BLOCKED: Max trades/day reached | ", TodayTradeCount, "/", MaxTradesPerDay);
       return false;
    }
    if(consecutiveLosses >= MaxConsecutiveLosses)
    {
-      Print("BLOCKED: Max consecutive losses reached | ", consecutiveLosses, "/", MaxConsecutiveLosses);
+      if(DebugLog) Print("BLOCKED: Max consecutive losses reached | ", consecutiveLosses, "/", MaxConsecutiveLosses);
       return false;
    }
    if(!IsSpreadOK())                             return false;
@@ -886,7 +887,7 @@ bool CanTrade()
    }
    if(openCount >= MaxOpenPositions)
    {
-      Print("BLOCKED: Max open positions | ", openCount, "/", MaxOpenPositions);
+      if(DebugLog) Print("BLOCKED: Max open positions | ", openCount, "/", MaxOpenPositions);
       return false;
    }
    return true;
@@ -945,17 +946,17 @@ void PlaceTrade()
    }
 
    // NORMAL TRADING MODE
-   if(RegimeBlocksEntry(ADXHandle)) { Print("Regime: ranging (ADX<", DoubleToString(RegimeMinADX,0), ") — skipping"); return; }  // [regime]
+   if(RegimeBlocksEntry(ADXHandle)) { if(DebugLog) Print("Regime: ranging (ADX<", DoubleToString(RegimeMinADX,0), ") — skipping"); return; }  // [regime]
    int h1Trend = GetTrendDirection();
    int h4Trend = GetH4TrendDirection();
    int candle  = GetCandleDirection();
 
-   if(h1Trend == 0)                                        { Print("H1: No clear trend"); return; }
-   if(UseH4Filter && h4Trend != 0 && h4Trend != h1Trend)  { Print("H4 trend conflicts with H1 — skipping"); return; }
+   if(h1Trend == 0)                                        { if(DebugLog) Print("H1: No clear trend"); return; }
+   if(UseH4Filter && h4Trend != 0 && h4Trend != h1Trend)  { if(DebugLog) Print("H4 trend conflicts with H1 — skipping"); return; }
 
    bool isBuy  = (h1Trend == 1  && candle == 1);
    bool isSell = (h1Trend == -1 && candle == -1);
-   if(!isBuy && !isSell)                                   { Print("Candle doesn't match trend — skipping"); return; }
+   if(!isBuy && !isSell)                                   { if(DebugLog) Print("Candle doesn't match trend — skipping"); return; }
 
    double entry = isBuy ? tick.ask : tick.bid;
 
@@ -969,7 +970,7 @@ void PlaceTrade()
    tp = NormalizeDouble(tp, _Digits);
 
    double slPoints = MathAbs(entry - sl) / _Point;
-   if(!IsStopDistanceOK(slPoints)) { Print("Stop too close: ", slPoints, " < ", MinStopDistance); return; }
+   if(!IsStopDistanceOK(slPoints)) { if(DebugLog) Print("Stop too close: ", slPoints, " < ", MinStopDistance); return; }
 
    // Safety: warn if minimum lot would risk more than 5% of balance (account too small for this symbol)
    {
