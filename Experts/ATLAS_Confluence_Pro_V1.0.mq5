@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//|                                         CONFLUENCE V1.0          |
+//|                                  ATLAS CONFLUENCE PRO V1.0       |
 //|                    INDIVIDUAL SESSION CONTROLS                   |
 //|                           Created By - Stephen REEN              |
 //+------------------------------------------------------------------+
@@ -147,7 +147,7 @@ int OnInit()
    ChartSetInteger(0, CHART_EVENT_MOUSE_MOVE, true);
 
    Print("========================================");
-   Print("CONFLUENCE V1.0 - Created By Stephen REEN");
+   Print("ATLAS Confluence Pro V1.0 - Created By Stephen REEN");
    Print("H4 Filter:      ", UseH4Filter       ? "ON" : "OFF");
    Print("RSI Filter:     ", UseRSIFilter       ? "ON" : "OFF");
    Print("Pullback Filter:", UsePullbackFilter  ? "ON" : "OFF");
@@ -185,7 +185,7 @@ void OnDeinit(const int reason)
    ObjectsDeleteAll(0, "SwingLine_");
    ObjectsDeleteAll(0, DPFX);
    Comment("");
-   Print("CONFLUENCE V1.0 SHUTDOWN");
+   Print("ATLAS Confluence Pro V1.0 SHUTDOWN");
 }
 
 //+------------------------------------------------------------------+
@@ -896,8 +896,8 @@ void PlaceTrade()
       if(slPoints < minStop) { Print("Stop too close: ", slPoints, " < ", minStop); return; }
 
       bool result = isBuy ?
-                   trade.Buy(volume, _Symbol, entry, sl, tp, "CONFLUENCE BUY") :
-                   trade.Sell(volume, _Symbol, entry, sl, tp, "CONFLUENCE SELL");
+                   trade.Buy(volume, _Symbol, entry, sl, tp, "ATLAS Confluence Pro BUY") :
+                   trade.Sell(volume, _Symbol, entry, sl, tp, "ATLAS Confluence Pro SELL");
 
       if(result)
       {
@@ -962,8 +962,8 @@ void PlaceTrade()
    if(volume <= 0) { Print("Invalid volume"); return; }
 
    bool result = isBuy ?
-                trade.Buy(volume, _Symbol, entry, sl, tp, "CONFLUENCE BUY") :
-                trade.Sell(volume, _Symbol, entry, sl, tp, "CONFLUENCE SELL");
+                trade.Buy(volume, _Symbol, entry, sl, tp, "ATLAS Confluence Pro BUY") :
+                trade.Sell(volume, _Symbol, entry, sl, tp, "ATLAS Confluence Pro SELL");
 
    if(result)
    {
@@ -1144,7 +1144,7 @@ void UpdateDisplay()
 
    // ── Header (always visible) ───────────────────────────
    DashText(DPFX+"TITLE", PanelX+12, PanelY+9,
-            "Confluence  V1.0", C_ACCENT, 10, true);
+            "ATLAS Confluence Pro V1.0", C_ACCENT, 10, true);
    DashText(DPFX+"SUB",   PanelX+12, PanelY+31,
             "Stephen REEN     " + _Symbol + "," + TimeFrameStr(),
             C_LABEL, 8, false);
@@ -1548,8 +1548,8 @@ void PlaceTradeExtra(string sym, ConfSymState &st)
    xtrade.SetDeviationInPoints(30);
    xtrade.SetTypeFillingBySymbol(sym);
    bool result = isBuy ?
-                xtrade.Buy(volume, sym, entry, sl, tp, "CONFLUENCE BUY (" + sym + ")") :
-                xtrade.Sell(volume, sym, entry, sl, tp, "CONFLUENCE SELL (" + sym + ")");
+                xtrade.Buy(volume, sym, entry, sl, tp, "ATLAS Confluence Pro BUY (" + sym + ")") :
+                xtrade.Sell(volume, sym, entry, sl, tp, "ATLAS Confluence Pro SELL (" + sym + ")");
    if(result)
    {
       st.todayTradeCount++;
@@ -1651,7 +1651,7 @@ void ProcessExtraSymbol(int idx)
 //+------------------------------------------------------------------+
 void OnTick()
 {
-   ChartSetString(ChartID(), CHART_COMMENT, "Confluence V1.0 by Stephen REEN");
+   ChartSetString(ChartID(), CHART_COMMENT, "ATLAS Confluence Pro V1.0 by Stephen REEN");
    UpdateDisplay();
 
    CheckFridayClose();
