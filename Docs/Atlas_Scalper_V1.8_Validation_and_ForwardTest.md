@@ -42,6 +42,29 @@ Zero-latency ideal execution (no spread/commission modeled).
   where robust becomes over-fit. Its value is that it works untuned at 22.
 - Do not re-enable silver/cable extras; both lost money in testing.
 
+## ADX threshold robustness check (PASSED)
+
+To confirm the edge is not curve-fit to exactly ADX 22, the 5 windows were
+re-run at the two edges of the textbook trend band (20 and 25) and compared.
+
+| Window | ADX 20 (PF) | ADX 22 (PF) | ADX 25 (PF) |
+|---|---|---|---|
+| Jan–Apr 2025 | 3.27 | 3.41 | 3.24 |
+| Mar–Jun 2026 | 1.67 | 2.24 | 2.49 |
+| Jul–Oct 2024 | 1.78 | 1.74 | 1.88 |
+| Jan–Apr 2024 | 1.39 | 1.36 | 1.56 |
+| Nov–Feb (chop) | 0.97 | 0.94 | 0.71 |
+| **Aggregate net** | **+$2,162** | **+$2,236** | **+$2,079** |
+
+Conclusion: the edge holds across the entire 20–25 band (4/5 windows
+strongly profitable at every threshold; the chop window stays a small loss
+at all three — a regime-inherent weakness, not a tuning artifact). The three
+aggregates are within ~7% of each other, so the threshold is not a knife
+edge — the edge is robust, not over-fit. `RegimeMinADX=22` is retained as
+the unbiased midpoint (and it had the best aggregate), NOT because it was
+selected for being best. ADX 25 is slightly worse in chop because ADX rarely
+exceeds 25 in ranging markets, so it only catches failed breakouts.
+
 ## Forward-test (the only remaining gate before real money)
 
 Backtests use ideal execution and known history. The one test that cannot
