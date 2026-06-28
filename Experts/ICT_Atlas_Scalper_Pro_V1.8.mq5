@@ -257,14 +257,14 @@ input bool   EnableEntryReport     = false; // [V1.7] Print per-bar ENTRY REJECT
 input bool   RelaxedMode           = false;
 
 input group "========== MULTI-SYMBOL (EXTRA) =========="
-input string ExtraTradeSymbols     = "GBPUSD,EURUSD,XAGUSD"; // CSV list of extra symbols to trade alongside the chart symbol. Empty = unchanged single-symbol behavior
-input bool   ExtraSymbolsEnabled   = true;   // Master kill-switch for the extra-symbol engine
+input string ExtraTradeSymbols     = "EURUSD";  // CSV list of extra symbols. Engine intact but OFF by default — 5-window validation favored gold-only (silver/cable lost money)
+input bool   ExtraSymbolsEnabled   = false;  // Master kill-switch. Default OFF: validated config is gold-only. Set true to re-enable extras.
 input double ExtraRiskPercent      = 0.0;    // Risk % per trade for extra symbols. 0 = reuse chart symbol's effRiskPct
 input int    ExtraMaxTradesPerDay  = 0;      // Per-extra-symbol daily trade cap. 0 = auto-derive from MaxTradesPerDay
 input bool   ExtraDebugLog         = false;  // Print debug info for the extra-symbol engine
 
 input group "========== REGIME FILTER (TREND STRENGTH) =========="
-input bool            UseRegimeFilter  = false;      // Only trade when the market is trending (ADX gate). Skips ranging/chop regimes.
+input bool            UseRegimeFilter  = true;       // [VALIDATED] Only trade when trending (ADX gate). Improved all 5 backtest windows; default ON.
 input ENUM_TIMEFRAMES RegimeTF         = PERIOD_H4;  // Timeframe the trend-strength (ADX) is measured on
 input int             RegimeADXPeriod  = 14;         // ADX period (Wilder standard = 14)
 input double          RegimeMinADX     = 22.0;       // Minimum ADX to allow entries (below = ranging; textbook trend threshold ~20-25)

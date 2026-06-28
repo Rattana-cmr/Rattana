@@ -119,3 +119,6 @@ ExtraSymbolsEnabled=false
 ExtraRiskPercent=0.0
 ExtraMaxTradesPerDay=0
 ExtraDebugLog=false
+UseRegimeFilter=true
+RegimeADXPeriod=14
+RegimeMinADX=22.0
