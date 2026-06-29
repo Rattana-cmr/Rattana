@@ -1,10 +1,10 @@
 //+------------------------------------------------------------------+
 //|                                ATLAS_Liquidity_Pro.mq5           |
 //|              ATLAS Liquidity Pro - Sweep & Reversal Engine       |
-//|                     Version 1.00                                |
+//|                     Version 1.01                                |
 //+------------------------------------------------------------------+
 #property copyright "ATLAS Liquidity Pro"
-#property version   "1.00"
+#property version   "1.01"
 #property strict
 #property description "ATLAS Liquidity Pro - multi-symbol liquidity-sweep reversal scanner"
 
@@ -319,7 +319,7 @@ int OnInit()
       CreateDashboard();
 
    Print("========================================");
-   Print("ATLAS LIQUIDITY PRO v1.00 INITIALIZED");
+   Print("ATLAS LIQUIDITY PRO v1.01 INITIALIZED");
    Print("Sweep & Reversal Engine - Multi-Symbol Scanner");
    Print("Monitoring: ", IntegerToString(symbolCnt), " symbols");
    Print("Aggressive Mode: ", EnumToString(InpAggressiveMode));
@@ -1169,9 +1169,14 @@ void CheckOBConfirmation(int idx)
 
    if(symbols[idx].obLevel == 0)
    {
+      // Start at i=1, not i=0: m1[0] is the bar whose close gets tested against
+      // obLevel below. Including it here made obLevel >= m1[0].close (short) or
+      // <= m1[0].close (long) by construction (high>=close, low<=close always),
+      // so triggered was almost always true on the very first check instead of
+      // requiring a real retest of a prior swing extreme.
       int lookback = MathMin(InpOBLookbackBars, copied - 1);
       double extreme = (symbols[idx].setupDirection == DIR_SHORT) ? 0.0 : DBL_MAX;
-      for(int i = 0; i < lookback; i++)
+      for(int i = 1; i <= lookback; i++)
       {
          if(symbols[idx].setupDirection == DIR_SHORT)
             extreme = MathMax(extreme, m1[i].high);
