@@ -1,11 +1,12 @@
 //+------------------------------------------------------------------+
-//|                                LiquiditySweep_Reversal_EA.mq5    |
-//|                     HIGH FREQUENCY - 15-30 trades/day           |
-//|                     Version 7.16                                |
+//|                                ATLAS_Liquidity_Pro.mq5           |
+//|              ATLAS Liquidity Pro - Sweep & Reversal Engine       |
+//|                     Version 1.00                                |
 //+------------------------------------------------------------------+
-#property copyright "Liquidity Sweep EA"
-#property version   "7.16"
+#property copyright "ATLAS Liquidity Pro"
+#property version   "1.00"
 #property strict
+#property description "ATLAS Liquidity Pro - multi-symbol liquidity-sweep reversal scanner"
 
 #include <Trade\Trade.mqh>
 
@@ -145,8 +146,8 @@ input int      InpDashboardXOffset = 10;
 input int      InpDashboardYOffset = 10;
 
 input group "=== Expert Settings ==="
-input ulong    InpMagicNumber      = 20250609;
-input string   InpComment          = "LSweep_HF";
+input ulong    InpMagicNumber      = 20260629;
+input string   InpComment          = "ATLAS_HF";
 input bool     InpDebugMode        = true;
 
 //+------------------------------------------------------------------+
@@ -318,7 +319,8 @@ int OnInit()
       CreateDashboard();
 
    Print("========================================");
-   Print("LIQUIDITY SWEEP EA v7.16 - HIGH FREQUENCY");
+   Print("ATLAS LIQUIDITY PRO v1.00 INITIALIZED");
+   Print("Sweep & Reversal Engine - Multi-Symbol Scanner");
    Print("Monitoring: ", IntegerToString(symbolCnt), " symbols");
    Print("Aggressive Mode: ", EnumToString(InpAggressiveMode));
    Print("Correlation Filter: ", InpUseCorrelationFilter ? "ON (max " + IntegerToString(InpMaxCorrelatedPositions) + ")" : "OFF");
@@ -1543,7 +1545,7 @@ void CreateDashboard()
       ObjectSetInteger(0, "DB_Title", OBJPROP_COLOR,     clrGold);
       ObjectSetInteger(0, "DB_Title", OBJPROP_FONTSIZE,  10);
       ObjectSetString(0,  "DB_Title", OBJPROP_FONT,      "Arial Bold");
-      ObjectSetString(0,  "DB_Title", OBJPROP_TEXT,      "Liquidity Sweep Reversal Pro");
+      ObjectSetString(0,  "DB_Title", OBJPROP_TEXT,      "ATLAS Liquidity Pro");
    }
    if(ObjectCreate(0, "DB_Version", OBJ_LABEL, 0, 0, 0))
    {
@@ -1553,7 +1555,7 @@ void CreateDashboard()
       ObjectSetInteger(0, "DB_Version", OBJPROP_COLOR,     clrWhite);
       ObjectSetInteger(0, "DB_Version", OBJPROP_FONTSIZE,  7);
       ObjectSetString(0,  "DB_Version", OBJPROP_FONT,      "Arial");
-      ObjectSetString(0,  "DB_Version", OBJPROP_TEXT,      "V7.16 BOS: " + BOSModeText(InpBOSMode));
+      ObjectSetString(0,  "DB_Version", OBJPROP_TEXT,      "V1.00 BOS: " + BOSModeText(InpBOSMode));
    }
    if(ObjectCreate(0, "DB_Toggle", OBJ_BUTTON, 0, 0, 0))
    {
@@ -1612,7 +1614,7 @@ void UpdateDashboard()
    }
    ObjectSetInteger(0, "DB_Version", OBJPROP_XDISTANCE, x + 8);
    ObjectSetInteger(0, "DB_Version", OBJPROP_YDISTANCE, y + 28);
-   ObjectSetString(0,  "DB_Version", OBJPROP_TEXT,      "V7.16 BOS: " + BOSModeText(InpBOSMode));
+   ObjectSetString(0,  "DB_Version", OBJPROP_TEXT,      "V1.00 BOS: " + BOSModeText(InpBOSMode));
 
    int line = 40;
    string modeText = "";
