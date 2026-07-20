@@ -3293,10 +3293,16 @@ void InitMLCSVFiles()
 
       if(!isTester)
       {
-         // Live: append to existing file
+         // Live: append to existing file. NOTE: FILE_READ|FILE_WRITE creates
+         // the file when it doesn't exist, so detect "new file" by size, not
+         // by open failure — otherwise the header row is never written.
          gMLSignalFile = FileOpen(fname, FILE_READ|FILE_WRITE|FILE_CSV|FILE_ANSI|FILE_COMMON, ',');
          if(gMLSignalFile != INVALID_HANDLE)
+         {
             FileSeek(gMLSignalFile, 0, SEEK_END);
+            if(FileTell(gMLSignalFile) == 0)
+               needHeader = true; // Empty/new file — write header below
+         }
          else
             needHeader = true; // File didn't exist — write header below
       }
@@ -3341,10 +3347,15 @@ void InitMLCSVFiles()
 
       if(!isTester)
       {
-         // Live: append to existing file
+         // Live: append to existing file. Same new-file detection as above —
+         // FILE_READ|FILE_WRITE creates missing files, so check size for header.
          gMLTradeFile = FileOpen(fname, FILE_READ|FILE_WRITE|FILE_CSV|FILE_ANSI|FILE_COMMON, ',');
          if(gMLTradeFile != INVALID_HANDLE)
+         {
             FileSeek(gMLTradeFile, 0, SEEK_END);
+            if(FileTell(gMLTradeFile) == 0)
+               needHeader = true;
+         }
          else
             needHeader = true;
       }
