@@ -1,0 +1,207 @@
+; ICT ATLAS EA V1.0 — Phase 1C EDGE VALIDATION Preset
+; Tests 5 statistically identified edges from Phase 1 dataset analysis:
+;   1. UseMSSFilter=TRUE       (hard-block non-MSS setups — PF 1.213→1.697)
+;   2. RequirePremDiscAlign=TRUE  (LONG in PREMIUM, SHORT in DISCOUNT — PF +8-10%)
+;   3. BlockLondonHours=TRUE   (London 07:00-10:00 blocked — time-based gate)
+;   4. BlockShortInTrend=TRUE  (SHORT blocked when TRENDING + ADX>=25 saves -$1,041)
+;   5. MaxSLPips=200           (captures high-vol setups missed by 80-pip limit)
+; Compare against ICT_ATLAS_Phase1B_Baseline.set
+; XAUUSD M15 | 2016.01.01 – 2026.01.01 | $1,000 deposit | 1:100 leverage
+
+SymPreset=1                    ; XAUUSD (Gold)
+
+; [01] BIAS ENGINE
+UseBiasEngine=false
+RequireWeeklyBias=false
+RequireDailyBias=false
+RequireH4Bias=false
+BiasSwingLookback=5
+
+; [02] LIQUIDITY ENGINE
+UseLiquidityEngine=false
+UseEQHEQL=true
+EQHTolerance=5.0
+LiqLookbackBars=50
+SweepWickMinPips=2
+
+; [03] MARKET STRUCTURE ENGINE
+; CHANGE 1: UseMSSFilter=TRUE — hard-blocks non-MSS setups (bug fixed in P1C)
+UseMSSFilter=true
+UseBOSFilter=false
+MSSwingLookback=3
+MSSLookbackBars=30
+
+; [04] DISPLACEMENT ENGINE
+UseDispFilter=false
+DispMinBodyPct=0.60
+DispMinATRMulti=1.30
+DispLookbackBars=5
+
+; [05] FVG ENGINE
+UseFVGFilter=false
+UseFVGEntry=true
+UseIFVG=true
+UseCEentry=true
+FVGMaxAgeBars=50
+MaxFVGsTracked=20
+
+; [06] PD ARRAY ENGINE
+UsePDAEngine=false
+PDA_UseFVG=true
+PDA_UseIFVG=true
+PDA_UseOB=true
+PDA_UseBreaker=true
+
+; [07] PREMIUM/DISCOUNT ENGINE
+UsePremDiscFilter=false
+DiscountZone=0.50
+PremiumZone=0.50
+DealingRangeLookback=60
+
+; [08] SESSION & KILLZONE ENGINE
+UseSessionFilter=false
+BrokerGMTOffset=3
+AutoGMTOffset=false
+SessionAsian=false
+SessionLondon=false
+SessionNewYork=true
+SessionNYPM=false
+AsianStartHour=0
+AsianEndHour=7
+LondonStartHour=7
+LondonEndHour=10
+NYStartHour=13
+NYEndHour=16
+NYPMStartHour=18
+NYPMEndHour=20
+
+; [09] POWER OF 3 ENGINE
+UsePO3Filter=false
+PO3ManipMinPips=10.0
+
+; [10] SMT DIVERGENCE ENGINE
+UseSMTFilter=false
+SMTSymbol=XAGUSD
+SMTLookbackBars=5
+
+; [11] ADR FILTER
+UseADRFilter=true
+ADRPeriod=14
+ADRMaxPct=0.80
+
+; [12] NEWS FILTER
+UseNewsFilter=false
+
+; [13] MARKET CONDITION FILTER
+UseConditionFilter=true
+TradeInTrend=true
+TradeInRanging=true
+TradeInChoppy=true
+CondADXPeriod=14
+CondADXTrend=25.0
+CondADXChoppy=18.0
+BlockShortInBullTrend=false
+BullTrendADXMin=30.0
+
+; [P1C] EDGE VALIDATION FILTERS
+; CHANGE 2: RequirePremDiscAlign — LONG in PREMIUM, SHORT in DISCOUNT
+RequirePremDiscAlign=true
+; CHANGE 3: BlockLondonHours — time-based gate replaces session label
+BlockLondonHours=true
+; CHANGE 4: BlockShortInTrend — SHORT blocked when TRENDING + ADX >= 25
+BlockShortInTrend=true
+TrendShortADXMin=25.0
+
+; [15-16] SPREAD & SLIPPAGE FILTERS
+MaxSpreadPips=50
+MaxSlippagePips=5
+
+; [17] CORRELATION FILTER
+UseCorrelFilter=false
+
+; [18] CONFLUENCE SCORING SYSTEM
+UseScoringSystem=true
+MinScore=60
+ScoreWeeklyBias=15
+ScoreDailyBias=15
+ScoreLiqSweep=20
+ScoreMSS=20
+ScoreDisplacement=15
+ScoreFVG=10
+ScoreKillzone=10
+ScoreSMT=5
+ScoreADR=5
+ScorePO3=5
+ScorePremDisc=5
+
+; [19] TRADE QUALITY GRADES
+AllowedGrades=3
+GradeAPlus=100
+GradeA=80
+GradeB=60
+
+; [25] RISK MANAGEMENT
+RiskMode=0
+RiskPercent=0.50
+FixedLotSize=0.01
+MaxLotCap=0.50
+MaxTradesPerDay=10
+MaxConsecLosses=100
+
+; [22] ADVANCED TRADE MANAGEMENT
+TP1_RR=1.0
+TP2_RR=2.0
+TP3_RR=3.0
+TP1_ClosePct=40.0
+TP2_ClosePct=40.0
+UseBreakeven=true
+BreakevenBufferPips=5
+UseTrailingStop=false
+TrailStartPips=50
+TrailStepPips=15
+SLBufferPips=10
+; CHANGE 5: MaxSLPips=200 — captures high-volatility setups
+MaxSLPips=200
+MinSLPips=15
+
+; [23] DAILY PROFIT LOCK
+UseProfitLock=true
+ProfitLock_ReduceR=3.0
+ProfitLock_StopR=5.0
+ProfitLock_ReducePct=50.0
+
+; [24] DAILY LOSS PROTECTION
+UseLossProtect=true
+LossProtect_ReduceR=2.0
+LossProtect_StopR=100.0
+MaxWeeklyLossR=20.0
+
+; TRADE CLOSE RULES
+CloseOnFriday=true
+FridayCloseHour=14
+CooldownMinutes=15
+
+; [26] VISUAL CHART TOOLS
+DrawPDH_PDL=false
+DrawPWH_PWL=false
+DrawSessionRanges=false
+DrawFVGZones=false
+DrawOBZones=false
+DrawLiqSweeps=false
+DrawMSSLines=false
+DrawTargets=true
+
+; [27] DEBUG PANEL
+ShowPanel=false
+ShowStatPanel=true
+DebugLogs=false
+
+; [29] AGGRESSIVE MODE
+AggressiveMode=false
+ScalperMode=false
+AllowContinuation=true
+
+; [28] ML DATA COLLECTION
+EnableMLExport=true
+MLExportSignals=true
+MLExportTrades=true

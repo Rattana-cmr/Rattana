@@ -45,3 +45,17 @@ $RECYCLE.BIN/
 Network Trash Folder
 Temporary Items
 .apdisk
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# HistData staging — large binary ZIPs, not for version control
+ML/data/histdata_staging/
+
+# ML large data files
+ML/data/XAUUSD_M15_Extended.csv
+
+# Claude Code session data
+.claude/

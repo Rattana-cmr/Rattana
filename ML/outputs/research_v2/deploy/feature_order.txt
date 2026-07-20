@@ -1,0 +1,48 @@
+ 0  hour
+ 1  month
+ 2  day_of_week
+ 3  session_ny
+ 4  weekly_bias
+ 5  daily_bias
+ 6  h4_bias
+ 7  h1_bias
+ 8  bias_alignment
+ 9  pdh_sweep
+10  pdl_sweep
+11  pwh_sweep
+12  pwl_sweep
+13  asian_sweep
+14  eqh_sweep
+15  eql_sweep
+16  sweep_count
+17  displacement
+18  fvg_present
+19  ob_present
+20  adr_ok
+21  prem_disc
+22  market_cond
+23  mss_present
+24  atr14
+25  atr50
+26  atr_ratio
+27  spread_pips
+28  spread_pct_atr
+29  adx
+30  vol_regime
+31  spread_quality
+32  score_weekly
+33  score_daily
+34  score_liqsweep
+35  score_mss
+36  score_displacement
+37  score_fvg
+38  score_killzone
+39  score_smt
+40  score_adr
+41  score_po3
+42  score_premdisc
+43  confluence_score
+44  score_h4align
+45  score_h1align
+46  ob_score
+47  cond_score
